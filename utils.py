@@ -46,12 +46,6 @@ def path_graph(m,time_style):
             adm[i, i + 1] = 1
             adm[i, i + 365] = 1
         return adm
-    if time_style == 'month_year':
-        adm = np.zeros(shape=(m, m))
-        for i in range(m - 31):
-            adm[i, i + 1] = 1
-            adm[i, i + 12] = 1
-        return adm
 
 #将邻接矩阵转换为边的索引和权重，adm即为邻接矩阵的缩写
 def tran_adm_to_edge_index(adm):
@@ -119,21 +113,24 @@ def get_rmse(a1, a2):
 def create_inout_sequences(input_data, x_length=60, y_length=1, ml_dim=0, ld1=True):#此处设置了若干默认数值
     seq_list, seq_arr, label_arr = [], None, None
     data_length = input_data.shape[input_data.ndim-1]
-    x_y_length = x_length + y_length
-    seq_arr = np.zeros(data_length - x_y_length, x_length)
-    label_arr = np.zeros()
-    for i in range(data_length - x_y_length + 1):
-        if input_data.ndim == 2:
-            seq = input_data[:,i: (i + x_length)]
+    x_y_length = x_length + y_length - 1
+    if input_data.ndim == 2:
+        seq_arr = np.zeros((data_length - x_y_length, input_data.shape[0], x_length))
+        label_arr = np.zeros((data_length - x_y_length, y_length))
+        for i in range(data_length - x_y_length):
+            seq = input_data[:, i: (i + x_length)]
             label = input_data[ml_dim, (i + x_length): (i + x_length + y_length)].reshape(1, -1)
-            seq = np.expand_dims(seq, 0)
-        elif input_data.ndim == 1:
+            seq_arr[i, :, :] = seq
+            label_arr[i, :] = label
+    elif input_data.ndim == 1:
+        seq_arr = np.zeros((data_length - x_y_length, x_length))
+        label_arr = np.zeros((data_length - x_y_length, y_length))
+        for i in range(data_length - x_y_length):
             seq = input_data[i: (i + x_length)]
             label = input_data[(i + x_length): (i + x_length + y_length)]
             seq, label = seq.reshape(1, -1), label.reshape(1, -1)
-        if (seq_arr is None) & (label_arr is None):
-            seq_arr, label_arr = seq, label
-        else:
-            seq_arr, label_arr = np.concatenate([seq_arr, seq], axis=0), np.concatenate([label_arr, label], axis=0)
+            seq_arr[i, :] = seq
+            label_arr[i, :] = label
+            # seq_arr, label_arr = np.concatenate([seq_arr, seq], axis=0), np.concatenate([label_arr, label], axis=0)
     return seq_arr, label_arr
 

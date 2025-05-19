@@ -15,6 +15,8 @@ import math
 from sklearn.metrics import r2_score
 from torch.utils.data import Dataset
 
+
+
 class dayGNNnet(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim, edge_weight):
         super().__init__()
@@ -45,21 +47,24 @@ class dayGNNnet(nn.Module):
             x = self.linear2(x)
             x = self.linear3(x)
             x = x.squeeze(dim=2)
+            # np.save('day_embedding.npy', x.detach().cpu().numpy())
         h = self.sage1(x, edge_index)
         h = self.sage2(h, edge_index)
         h = self.sage2(h, edge_index)
-        out_0 = h
-        h = h.unsqueeze(0).unsqueeze(0)
-        out = self.cnn1(h)
-        out = self.cnn2(self.drop(out))
-        out = self.cnn3(self.drop(out))
-        out = out.squeeze(0).squeeze(0)
-        out = out + out_0
 
-        out = self.linear2(out)
-        h = self.sage2(out, edge_index)
-        h = self.sage2(h, edge_index)
-        h = self.sage2(h, edge_index)
+        # out_0 = h
+        # h = h.unsqueeze(0).unsqueeze(0)
+        # out = self.cnn1(h)
+        # out = self.cnn2(self.drop(out))
+        # out = self.cnn3(self.drop(out))
+        # out = out.squeeze(0).squeeze(0)
+        # out = out + out_0
+        #
+        # out = self.linear2(out)
+        # h = self.sage2(out, edge_index)
+        # h = self.sage2(h, edge_index)
+        # h = self.sage2(h, edge_index)
+
         out_1 = h
         h = h.unsqueeze(0).unsqueeze(0)
         out = self.cnn1(h)
@@ -102,22 +107,23 @@ class yearGNNnet(nn.Module):
             x = self.linear2(x)
             x = self.linear3(x)
             x = x.squeeze(dim=2)
+            # np.save('year_embedding.npy', x.detach().cpu().numpy())
         h = self.sage1(x, edge_index)
         h = self.sage2(h, edge_index)
         h = self.sage2(h, edge_index)
 
-        out_0 = h
-        h = h.unsqueeze(0).unsqueeze(0)
-        out = self.cnn1(h)
-        out = self.cnn2(self.drop(out))
-        out = self.cnn3(self.drop(out))
-        out = out.squeeze(0).squeeze(0)
-        out = out + out_0
-
-        out = self.linear2(out)
-        h = self.sage2(out, edge_index)
-        h = self.sage2(h, edge_index)
-        h = self.sage2(h, edge_index)
+        # out_0 = h
+        # h = h.unsqueeze(0).unsqueeze(0)
+        # out = self.cnn1(h)
+        # out = self.cnn2(self.drop(out))
+        # out = self.cnn3(self.drop(out))
+        # out = out.squeeze(0).squeeze(0)
+        # out = out + out_0
+        #
+        # out = self.linear2(out)
+        # h = self.sage2(out, edge_index)
+        # h = self.sage2(h, edge_index)
+        # h = self.sage2(h, edge_index)
 
         out_1 = h
         h = h.unsqueeze(0).unsqueeze(0)
@@ -147,28 +153,29 @@ class MTTGnet(nn.Module):
     def forward(self, input, idx1, idx3):
         x1 = self.m1(input, idx1)
         x2 = self.m2(input, idx3)
-        if input.ndim == 3:
-            output = torch.zeros_like(input[:, 0, -self.output_dim:].squeeze(1))
-            abs1 = torch.abs(input[:, 0, -self.output_dim:].squeeze(1) - x1)
-            abs2 = torch.abs(input[:, 0, -self.output_dim:].squeeze(1) - x2)
-            abs1 = torch.sum(abs1, 1)
-            abs2 = torch.sum(abs2, 1)
-            min_abs, min_indices = torch.min(torch.stack([abs1, abs2]), dim=0)
-            flag = torch.bincount(min_indices.reshape(-1))
-            mask_0 = (min_indices == 0)
-            mask_1 = (min_indices == 1)
-            output[mask_0, -1] = x1[mask_0, -1]
-            output[mask_1, -1] = x2[mask_1, -1]
-        if input.ndim == 2:
-            output = torch.zeros_like(input)
-            abs1 = torch.abs(input - x1)
-            abs2 = torch.abs(input - x2)
-            min_abs, min_indices = torch.min(torch.stack([abs1[:, -1], abs2[:, -1]]), dim=0)
-            flag = torch.bincount(min_indices.reshape(-1))
-            mask_0 = (min_indices == 0)
-            mask_1 = (min_indices == 1)
-            output[mask_0, -1] = x1[mask_0, -1]
-            output[mask_1, -1] = x2[mask_1, -1]
+
+        # Multipredictor Aggregator
+        for i in range(self.output_dim):
+            if input.ndim == 3:
+                output = torch.zeros_like(input[:, 0, :])
+                abs1 = torch.abs(input[:, 0, -1] - x1[:, -1])
+                abs2 = torch.abs(input[:, 0, -1] - x2[:, -1])
+                min_abs, min_indices = torch.min(torch.stack([abs1, abs2]), dim=0)
+                flag = torch.bincount(min_indices.reshape(-1))
+                mask_0 = (min_indices == 0)
+                mask_1 = (min_indices == 1)
+                output[mask_0, -1] = x1[mask_0, -1]
+                output[mask_1, -1] = x2[mask_1, -1]
+            if input.ndim == 2:
+                output = torch.zeros_like(input)
+                abs1 = torch.abs(input - x1)
+                abs2 = torch.abs(input - x2)
+                min_abs, min_indices = torch.min(torch.stack([abs1[:, -1], abs2[:, -1]]), dim=0)
+                flag = torch.bincount(min_indices.reshape(-1))
+                mask_0 = (min_indices == 0)
+                mask_1 = (min_indices == 1)
+                output[mask_0, -1] = x1[mask_0, -1]
+                output[mask_1, -1] = x2[mask_1, -1]
         return output, flag
 
 class Contrast_GNNmodel(nn.Module):
@@ -203,7 +210,7 @@ class Contrast_GNNmodel(nn.Module):
         self.cnn5 = nn.Conv2d(hidden_dim, hidden_dim, kernel_size=kr, padding=pd)
         self.cnn6 = nn.Conv2d(hidden_dim, 1, kernel_size=kr, padding=pd)
         self.bn = nn.BatchNorm2d(hidden_dim)
-        self.linear1 = nn.Linear(8, hidden_dim)
+        self.linear1 = nn.Linear(3, hidden_dim)
         self.linear2 = nn.Linear(hidden_dim, hidden_dim)
         self.linear3 = nn.Linear(hidden_dim, 1)
 

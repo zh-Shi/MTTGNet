@@ -32,8 +32,8 @@ seed_everything(233)
 #设置超参数
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
 # device = "cpu"
-l_x = 120
-l_y = 12
+l_x = 1
+l_y = 1
 hidden_dim = 64
 lr = 0.001
 weight_decay = 0.001
@@ -115,6 +115,7 @@ para_r2_train = np.zeros(epochs)
 para_r2_test = np.zeros(epochs)
 para_rmse = np.zeros(epochs)
 min_rmse = 100
+file = open('loss_values.txt', 'a')
 
 start_time = time.time()
 for epoch in range(epochs):
@@ -175,8 +176,8 @@ for epoch in range(epochs):
         mse = np.mean(np.square(train_predict - train_true))
         print("mse: {:.8f}".format(mse))
         print("dayNet:{}  yearNet:{}".format(flag[0], flag[1]))
-
-
+        file.write(f"Epoch:{epoch + 1} Loss_Train:{train_loss.item()} Loss_Test:{test_loss.item()} R2_Train:{r2_train} R2_Test:{r2_test}\n")
+file.close()
 
 end_time = time.time()
 run_time = end_time - start_time
@@ -190,14 +191,14 @@ print(np.sum((test_true-test_predict) > 0))
 print(np.sum((test_true-test_predict) < 0))
 print(np.sum(test_true-test_predict))
 
-if cut_co2 == False:
-    data_co2_predict = np.load('co2_test_predict.npy')
-    print(mk.original_test(test_predict-data_co2_predict))
-if cut_co2:
-    data_predict = np.load('test_predict.npy')
-    print(mk.original_test(data_predict-test_predict))
-
-utils.plot_data(test_predict-data_co2_predict)
+# if cut_co2 == False:
+#     data_co2_predict = np.load('co2_test_predict.npy')
+#     print(mk.original_test(test_predict-data_co2_predict))
+# if cut_co2:
+#     data_predict = np.load('test_predict.npy')
+#     print(mk.original_test(data_predict-test_predict))
+#
+# utils.plot_data(test_predict-data_co2_predict)
 
 l = len(test_predict)
 plt.figure(figsize=(60, 10))
@@ -210,14 +211,14 @@ plt.xticks([0, int(0.2 * l), int(0.4 * l), int(0.6 * l), int(0.8 * l), l - 2], d
 plt.xlabel("Date", fontsize=50)
 plt.ylabel("t2m(°C)", fontsize=50)
 plt.legend(fontsize=30)
-plt.savefig('./result/combined_predict')
+plt.savefig('./result_new/combined_predict.png')
 plt.show()
 
 
-np.save('./result/MTTGnet_train_loss.npy', para_trainloss)
-np.save('./result/MTTGnet_test_loss.npy', para_testloss)
-np.save('./result/MTTGnet_r2_test.npy', para_r2_test)
-np.save('./result/MTTGnet_rmse.npy', para_rmse)
+np.save('./result_new/MTTGnet_train_loss.npy', para_trainloss)
+np.save('./result_new/MTTGnet_test_loss.npy', para_testloss)
+np.save('./result_new/MTTGnet_r2_test.npy', para_r2_test)
+np.save('./result_new/MTTGnet_rmse.npy', para_rmse)
 
 # xepoch = np.linspace(1,1000,num=20)
 # plt.figure()
