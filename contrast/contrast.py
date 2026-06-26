@@ -11,7 +11,7 @@ import time
 import random
 import os
 import utils
-import net
+import contrast_net
 from sklearn.preprocessing import MinMaxScaler
 
 #固定随机数
@@ -38,19 +38,19 @@ l_y = 1
 hidden_dim = 64
 lr = 0.0001
 weight_decay = 5e-4
-epochs = 3000
-ratio_train = 0.9
+epochs = 1000
+ratio_train = 0.6
 num_layers = 1
 cut_co2 = False
 
 model_name_all = ["ResGraphnet", "GCN", "Cheb", "GIN", "UniMP", "TAGCN", "GAT", "LSTM", "GRU", "MTTGNet"]
-model_name = 'GAT'
+model_name = 'ResGraphnet'
 
-x = np.load('./data/ERA5_part/ERA5_temp/era5_t2m_daily_1956_2023_mean_anomaly.npy')
+x = np.load('../data/ERA5_part/ERA5_temp/era5_t2m_daily_1956_2023_mean_anomaly.npy')
 num = x.shape[0]
 
 # 导入其他数据
-data = np.load('./data/ERA5_part/nontemp_data_process/data_mixed.npy')
+data = np.load('../data/ERA5_part/nontemp_data_process/data_mixed.npy')
 x = np.vstack((x, data))
 
 num_train = int(ratio_train * num)
@@ -62,6 +62,14 @@ if x.ndim == 1:
 # 削减co2浓度
 if cut_co2:
     x[7, :] = np.concatenate((x[7, :num_train-1000], 2*x[7, num_train-1000]-x[7, num_train-1000:]))
+
+num = x.shape[0]
+x = x.transpose()
+num_train = int(ratio_train * num)
+if x.ndim == 2:
+    data_train, data_test = x[:, :num_train], x[:, num_train:num]
+if x.ndim == 1:
+    data_train, data_test = x[:num_train], x[num_train:num]
 
 start_time = time.time()
 x_train, y_train = utils.create_inout_sequences(data_train, l_x, l_y)
@@ -138,16 +146,16 @@ for epoch in range(epochs):
     para_rmse[epoch] = rmse
     min_rmse = min(rmse, min_rmse)
     if min_rmse == rmse:
-        torch.save(model.state_dict(), 'model.pth')
+        torch.save(model.state_dict(), '../model.pth')
         ep = epoch
         best_rmse_train = utils.get_rmse(train_predict, train_true)
         best_rmse_test = utils.get_rmse(test_predict, test_true)
         best_r2_train = utils.get_r2_score(train_predict, train_true, axis=1)
         best_r2_test = utils.get_r2_score(test_predict, test_true, axis=1)
         if cut_co2:
-            np.save('./result/{}_co2_test_predict.npy'.format(model_name), test_predict)
+            np.save('./result_new/{}_co2_test_predict.npy'.format(model_name), test_predict)
         if cut_co2 == False:
-            np.save('./result/{}_test_predict.npy'.format(model_name), test_predict)
+            np.save('./result_new/{}_test_predict.npy'.format(model_name), test_predict)
 
     if (epoch + 1) % 100 == 0:
         print("Epoch: {:05d}  Loss_Train: {:.5f}  Loss_Test: {:.5f}  R2_Train: {:.7f}  R2_Test: {:.7f}".
@@ -174,16 +182,16 @@ plt.plot(test_predict[0:l-2], c="orangered", label="test_predict", alpha=0.6)
 plt.plot(test_true[0:l-2], c="darkblue", label="test_true", alpha=0.6)
 plt.yticks(np.arange(int(min(test_predict)), int(max(test_predict) + 1), 0.5))
 # date = ['1956_01_01', '1969_08_10', '1983_03_19', '1996_10_28', '2010_06_07', '2023_12_31']
-date = ['2017_3_13', '2018_07_24', '2019_12_05', '2021_04_16', '2022_08_23', '2023_12_31']
-plt.xticks([0, int(0.2 * l), int(0.4 * l), int(0.6 * l), int(0.8 * l), l - 2], date)
+# date = ['2017_3_13', '2018_07_24', '2019_12_05', '2021_04_16', '2022_08_23', '2023_12_31']
+# plt.xticks([0, int(0.2 * l), int(0.4 * l), int(0.6 * l), int(0.8 * l), l - 2], date)
 plt.xlabel("Date", fontsize=50)
 plt.ylabel("t2m", fontsize=50)
 plt.legend(fontsize=30)
 plt.show()
 
 
-np.save('./result/{}/{}_r2_test.npy'.format(model_name, model_name), para_r2_test)
-np.save('./result/{}/{}_rmse.npy'.format(model_name, model_name), para_rmse)
+np.save('./result_new/{}_r2_test.npy'.format(model_name), para_r2_test)
+np.save('./result_new/{}_rmse.npy'.format(model_name), para_rmse)
 
 # xepoch = np.linspace(1,1000,num=20)
 # plt.figure()

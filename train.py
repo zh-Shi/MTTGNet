@@ -32,36 +32,38 @@ seed_everything(233)
 #设置超参数
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
 # device = "cpu"
-l_x = 120
-l_y = 12
+l_x = 60
+l_y = 1
 hidden_dim = 64
 lr = 0.001
 weight_decay = 0.001
 epochs = 3000
 ratio_train = 0.9
 cut_co2 = False
-
-x = np.load('./data/ERA5_part/ERA5_temp/era5_t2m_daily_1956_2023_mean_anomaly.npy')
-num = x.shape[0]
+is_check = False
+# x_0 = np.load('./data/ERA5_part/ERA5_temp/era5_t2m_6hourly_1956_2023_mean_anomaly.npy')
+x_0 = np.load('./data/ERA5_global/ERA5_2m_temperature_global_mean_anomaly.npy')
 
 # 导入其他数据
-data = np.load('./data/ERA5_part/nontemp_data_process/data_mixed.npy')
-x = np.vstack((x, data))
-
+# data = np.load('./data/ERA5_part/nontemp_data_process/data_mixed_6hourly.npy')
+data = np.load('./data/ERA5_global/data_mixed_6hourly_std.npy')
+x_0 = np.vstack((x_0, data))
+num = x_0.shape[-1]
 num_train = int(ratio_train * num)
-if x.ndim == 2:
-    data_train, data_test = x[:, :num_train], x[:, num_train:num]
-if x.ndim == 1:
-    data_train, data_test = x[:num_train], x[num_train:num]
 
 # 削减co2浓度
 if cut_co2:
-    x[7, :] = np.concatenate((x[7, :num_train-1000], 2*x[7, num_train-1000]-x[7, num_train-1000:]))
+    x_0[7, :] = np.concatenate((x_0[7, :num_train-1000], 2*x_0[7, num_train-1000]-x_0[7, num_train-1000:]))
+
+if x_0.ndim == 2:
+    data_train, data_test = x_0[:, :num_train], x_0[:, num_train:num]
+if x_0.ndim == 1:
+    data_train, data_test = x_0[:num_train], x_0[num_train:num]
 
 start_time = time.time()
 x_train, y_train = utils.create_inout_sequences(data_train, l_x, l_y)
 x_test, y_test = utils.create_inout_sequences(data_test, l_x, l_y)
-print(time.time()-start_time)
+print('creat sequences time used : {:05f}'.format(time.time()-start_time))
 
 x_train = torch.from_numpy(x_train).float().to(device)
 x_test = torch.from_numpy(x_test).float().to(device)
@@ -102,12 +104,20 @@ test_index = torch.arange(num_train, num_nodes, dtype=torch.long)
 train_mask = utils.index_to_mask(train_index, num_nodes).to(device)
 test_mask = utils.index_to_mask(test_index, num_nodes).to(device)
 
+input_dim = l_x
+output_dim = l_y
+aggregator_type = 'softmax' #[linear, softmax, min_distance]
+feature = x_0.shape[0]
 
-model = net.MTTGnet(l_x, hidden_dim, l_y, edge_weight_day, edge_weight_year).to(device)
+model = net.MTTGNet(edge_weight_day, edge_weight_year, feature, input_dim, hidden_dim, output_dim, aggregator_type).to(device)
+# model = net.MTTGnet(l_x, hidden_dim, l_y, edge_weight_day, edge_weight_year, feature).to(device)
+
 criterion = torch.nn.MSELoss().to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+
 edge_index_day, edge_index_year = edge_index_day.to(device), edge_index_year.to(device)
 edge_index_day0, edge_index_year0 = edge_index_day0.to(device), edge_index_year0.to(device)
+
 #损失记录
 para_trainloss = np.zeros(epochs)
 para_testloss = np.zeros(epochs)
@@ -115,13 +125,14 @@ para_r2_train = np.zeros(epochs)
 para_r2_test = np.zeros(epochs)
 para_rmse = np.zeros(epochs)
 min_rmse = 100
+file = open('loss_values.txt', 'a')
 
 start_time = time.time()
 for epoch in range(epochs):
     model.train()
     optimizer.zero_grad()
-    output, flag = model(x_train, edge_index_day, edge_index_year)
-    flag = flag.detach().cpu().numpy()
+    output = model(x_train, edge_index_day, edge_index_year)
+    # flag = flag.detach().cpu().numpy()
     # output = model(x, edge_index_day)
     # output = (output + 1) / 2 * mm1 + mn1
     # output_train, y_train = output[train_mask], y[train_mask]
@@ -133,9 +144,15 @@ for epoch in range(epochs):
     optimizer.step()
 
     model.eval()
+    # checking code
+    if epoch % 10 == 0 and is_check:
+        with torch.no_grad():
+            for name, param in model.named_parameters():
+                print(f"{name}: {param.mean().item():.6f}, {param.std().item():.6f}")
+
     # y_test_1 = y[test_mask][:-len_interp-l_y, :]
-    output, flag = model(x_test, edge_index_day0, edge_index_year0)
-    flag = flag.detach().cpu().numpy()
+    output = model(x_test, edge_index_day0, edge_index_year0)
+    # flag = flag.detach().cpu().numpy()
     y_test_1 = y[test_mask][:- l_y, :]
     y_test_2 = y[test_mask][-l_y:, :]
     y_test = torch.cat((y_test_1, y_test_2), dim=0)
@@ -163,41 +180,42 @@ for epoch in range(epochs):
         best_rmse_test = utils.get_rmse(test_predict, test_true)
         best_r2_train = utils.get_r2_score(train_predict, train_true, axis=1)
         best_r2_test = utils.get_r2_score(test_predict, test_true, axis=1)
-        best_flag_day, best_flag_year = flag[0], flag[1]
+        # best_flag_day, best_flag_year = flag[0], flag[1]
         if cut_co2:
             np.save('co2_test_predict.npy', test_predict)
         if cut_co2 == False:
             np.save('test_predict.npy', test_predict)
-
     if (epoch + 1) % 100 == 0:
+        epoch_time = time.time()
+        print(f'{epoch+1}Epoch Run Time:{epoch_time-start_time}')
         print("Epoch: {:05d}  Loss_Train: {:.5f}  Loss_Test: {:.5f}  R2_Train: {:.7f}  R2_Test: {:.7f}".
               format(epoch + 1, train_loss.item(), test_loss.item(), r2_train, r2_test))
         mse = np.mean(np.square(train_predict - train_true))
         print("mse: {:.8f}".format(mse))
-        print("dayNet:{}  yearNet:{}".format(flag[0], flag[1]))
-
-
+        # print("dayNet:{}  yearNet:{}".format(flag[0], flag[1]))
+        file.write(f"Epoch:{epoch + 1} Loss_Train:{train_loss.item()} Loss_Test:{test_loss.item()} R2_Train:{r2_train} R2_Test:{r2_test}\n")
+file.close()
 
 end_time = time.time()
 run_time = end_time - start_time
-print("Run_time:{}".format(run_time))
+print("Final Run Time:{}".format(run_time))
 print('best model epoch:{}'.format(ep))
 
 print("Best:RMSE_Train={:.5f}  RMSE_Test={:.5f}  R2_Train={:.7f}  R2_Test={:.7f}".
       format(best_rmse_train, best_rmse_test, best_r2_train, best_r2_test))
-print('best_network_use:dayNet:{}  yearNet:{}'.format(best_flag_day, best_flag_year))
+# print('best_network_use:dayNet:{}  yearNet:{}'.format(best_flag_day, best_flag_year))
 print(np.sum((test_true-test_predict) > 0))
 print(np.sum((test_true-test_predict) < 0))
 print(np.sum(test_true-test_predict))
 
-if cut_co2 == False:
-    data_co2_predict = np.load('co2_test_predict.npy')
-    print(mk.original_test(test_predict-data_co2_predict))
-if cut_co2:
-    data_predict = np.load('test_predict.npy')
-    print(mk.original_test(data_predict-test_predict))
-
-utils.plot_data(test_predict-data_co2_predict)
+# if cut_co2 == False:
+#     data_co2_predict = np.load('co2_test_predict.npy')
+#     print(mk.original_test(test_predict-data_co2_predict))
+# if cut_co2:
+#     data_predict = np.load('test_predict.npy')
+#     print(mk.original_test(data_predict-test_predict))
+#
+# utils.plot_data(test_predict-data_co2_predict)
 
 l = len(test_predict)
 plt.figure(figsize=(60, 10))
@@ -210,14 +228,14 @@ plt.xticks([0, int(0.2 * l), int(0.4 * l), int(0.6 * l), int(0.8 * l), l - 2], d
 plt.xlabel("Date", fontsize=50)
 plt.ylabel("t2m(°C)", fontsize=50)
 plt.legend(fontsize=30)
-plt.savefig('./result/combined_predict')
+plt.savefig('./result_new/combined_predict.png')
 plt.show()
 
 
-np.save('./result/MTTGnet_train_loss.npy', para_trainloss)
-np.save('./result/MTTGnet_test_loss.npy', para_testloss)
-np.save('./result/MTTGnet_r2_test.npy', para_r2_test)
-np.save('./result/MTTGnet_rmse.npy', para_rmse)
+np.save('./result_new/MTTGNet_train_loss.npy', para_trainloss)
+np.save('./result_new/MTTGNet_test_loss.npy', para_testloss)
+np.save('./result_new/MTTGNet_r2_test.npy', para_r2_test)
+np.save('./result_new/MTTGNet_rmse.npy', para_rmse)
 
 # xepoch = np.linspace(1,1000,num=20)
 # plt.figure()

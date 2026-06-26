@@ -10,7 +10,7 @@ dic ={
     #             'total_precipitation',], #选择要素
     # 'variable': 'specific_humidity',
     # 'variable':'2m_temperature',
-    'variable':'total_cloud_cover',
+    'variable':'mean_sea_level_pressure',
     'year': [
             '1980', '1981', '1982',
             '1983', '1984', '1985',
@@ -61,8 +61,6 @@ dic ={
 }
 
 var = dic['variable']
-data_path = f'/data_public/ERA5/ERA5_{var}'
-os.makedirs(data_path, exist_ok=True)
 
 for i in range(1980, 2025):
     for j in range(1, 13):

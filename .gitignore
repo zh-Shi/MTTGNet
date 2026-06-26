@@ -1,0 +1,22 @@
+﻿# 数据文件夹（坚决不上传）
+/data/
+data/
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# IDE 配置
+.idea/
+.vscode/
+
+# 结果文件（模型、图片、numpy数据等）
+result/
+*.pth
+*.npy
+*.png
+*.jpg
+
+# 其他临时文件
+fig/
+visualization/
