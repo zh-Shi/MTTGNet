@@ -17,6 +17,9 @@ result/
 *.png
 *.jpg
 
+# 论文文件
+paper.md
+
 # 其他临时文件
 fig/
 visualization/
