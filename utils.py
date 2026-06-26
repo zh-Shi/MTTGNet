@@ -11,6 +11,7 @@ import pandas as pd
 import time
 import random
 import os
+import math
 from sklearn.metrics import r2_score
 from torch.utils.data import Dataset
 
@@ -68,6 +69,72 @@ def variable_path(m,type):
     if type == 'all':
         adm = np.ones(shape=(m, m))
     return adm
+
+# ========== New utilities for MTTGNet v2 ==========
+
+def build_temporal_graph(seq_len, period_steps, self_loop=True):
+    """
+    Build a per-sample temporal graph over `seq_len` time steps.
+    All samples in a batch share the same graph topology.
+
+    Edges (all bidirectional):
+    - Sequential: i ↔ i+1
+    - Periodic: i ↔ i+period_steps
+    - Self-loops: i ↔ i (optional)
+
+    Args:
+        seq_len: number of time steps (nodes), T
+        period_steps: step interval for periodic edges (4=daily, 28=weekly)
+        self_loop: whether to add self-loop edges
+
+    Returns:
+        edge_index: [2, num_edges] torch.LongTensor
+    """
+    row, col = [], []
+
+    # Sequential edges (bidirectional)
+    for i in range(seq_len - 1):
+        row.extend([i, i + 1])
+        col.extend([i + 1, i])
+
+    # Periodic edges (bidirectional)
+    for i in range(seq_len - period_steps):
+        row.extend([i, i + period_steps])
+        col.extend([i + period_steps, i])
+
+    # Self-loops
+    if self_loop:
+        for i in range(seq_len):
+            row.extend([i, i])
+            col.extend([i, i])
+
+    return torch.tensor([row, col], dtype=torch.long)
+
+
+def day_of_year_encoding(doy_indices, dim, period=1460):
+    """
+    Sinusoidal encoding for day-of-year position (seasonal cycle).
+
+    Args:
+        doy_indices: [B, T] — day-of-year index (0 to period-1) for each time step
+        dim: encoding dimension
+        period: fundamental period (365*4=1460 for 6-hourly data over 1 year)
+
+    Returns:
+        pe: [B, T, dim] sinusoidal positional encoding
+    """
+    device = doy_indices.device
+    half_dim = dim // 2
+    # Normalize to [0, 2π)
+    pos = doy_indices.unsqueeze(-1).float() / period * (2 * math.pi)  # [B, T, 1]
+    # Frequency bands
+    freqs = torch.arange(half_dim, device=device).float()  # [half_dim]
+    # [B, T, 1] * [half_dim] → [B, T, half_dim]
+    angles = pos * freqs.unsqueeze(0).unsqueeze(0)
+    pe = torch.zeros(doy_indices.shape[0], doy_indices.shape[1], dim, device=device)
+    pe[:, :, 0::2] = torch.sin(angles)
+    pe[:, :, 1::2] = torch.cos(angles)
+    return pe
 
 
 #将邻接矩阵转换为边的索引和权重，adm即为邻接矩阵的缩写
@@ -155,7 +222,48 @@ def create_inout_sequences(input_data, x_length=60, y_length=1, ml_dim=0, ld1=Tr
             seq_arr[i, :] = seq
             label_arr[i, :] = label
             # seq_arr, label_arr = np.concatenate([seq_arr, seq], axis=0), np.concatenate([label_arr, label], axis=0)
+    # Also support 3D input: [F, N] where each row is a variable
+    elif input_data.ndim == 2 and ml_dim is not None:
+        pass  # handled by the ndim==2 branch above
     return seq_arr, label_arr
+
+
+def batch_edge_index(edge_index, batch_size, num_nodes_per_sample):
+    """
+    Offset edge_index for each sample in a batch to create a disjoint union of graphs.
+    Uses the same graph topology for all samples.
+
+    Args:
+        edge_index: [2, E] — edge index for ONE sample
+        batch_size: B — number of samples
+        num_nodes_per_sample: T — nodes per sample
+
+    Returns:
+        batched_edge_index: [2, B * E]
+    """
+    offsets = torch.arange(batch_size, device=edge_index.device) * num_nodes_per_sample
+    return torch.cat([edge_index + off for off in offsets], dim=1)
+
+
+def create_doy_indices(num_windows, seq_len=60, start_doy=0, period=1460):
+    """
+    Create day-of-year indices for each sliding window position.
+    The DOY index of a window position is its absolute DOY in the year cycle.
+
+    Args:
+        num_windows: number of sliding windows (= x.shape[0])
+        seq_len: lookback window length (x_length)
+        start_doy: day-of-year index of the first time step in the first window
+        period: samples per year (365*4=1460 for 6-hourly)
+
+    Returns:
+        doy_indices: [num_windows, seq_len] — DOY index for each position in each window
+    """
+    doy_indices = np.zeros((num_windows, seq_len), dtype=np.int64)
+    for i in range(num_windows):
+        for j in range(seq_len):
+            doy_indices[i, j] = (start_doy + i + j) % period
+    return doy_indices
 
 def MAE(pred, true):
     return np.mean(np.abs(pred - true))

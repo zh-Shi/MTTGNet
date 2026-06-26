@@ -171,6 +171,10 @@ class TCNLayer(nn.Module):
         return out.permute(0, 2, 1)  # [B, C, L]
 
 class  Multipredictor_Aggregator(nn.Module):
+    """
+    [DEPRECATED for MTTGNet v2 — kept for backward compatibility with old models]
+    Aggregates [B, T] scalar predictions from two branches.
+    """
     def __init__(self, hidden_dim, pred_dim, type):
         super(Multipredictor_Aggregator, self).__init__()
         self.type = type
@@ -233,4 +237,219 @@ class  Multipredictor_Aggregator(nn.Module):
             preds = [x1,x2]
             concat = torch.cat(preds, dim=-1)  # [B, T * num_predictors]
             output = self.fusion(concat)  # [B, T]
+        return output
+
+
+# ==================== MTTGNet v2 Modules ====================
+
+class VariableInteraction(nn.Module):
+    """
+    Learnable variable interaction via graph convolution.
+    Builds a learned adjacency matrix over F variable nodes,
+    then applies GCNConv (with learned edge weights) at each time step
+    to fuse variable features.
+
+    Input:  [B, F, T]  — B samples, F variables, T time steps
+    Output: [B, T, D]  — variable-fused features, time dim preserved
+    """
+    def __init__(self, num_vars=8, hidden_dim=64):
+        super(VariableInteraction, self).__init__()
+        self.num_vars = num_vars
+        self.hidden_dim = hidden_dim
+        embed_dim = hidden_dim
+
+        # Learnable source and destination embeddings for asymmetric adjacency
+        self.src_emb = nn.Parameter(torch.randn(num_vars, embed_dim) * 0.1)
+        self.dst_emb = nn.Parameter(torch.randn(num_vars, embed_dim) * 0.1)
+
+        # Initial projection: [1] → [D] per variable value
+        self.var_proj = nn.Linear(1, hidden_dim)
+
+        # GCN layers for variable interaction (with learnable edge weights)
+        self.gcn1 = gnn.GCNConv(hidden_dim, hidden_dim)
+        self.gcn2 = gnn.GCNConv(hidden_dim, hidden_dim)
+        self.norm1 = nn.LayerNorm(hidden_dim)
+        self.norm2 = nn.LayerNorm(hidden_dim)
+        self.act = nn.ReLU()
+
+    def forward(self, x):
+        # x: [B, F, T]
+        B, F, T = x.shape
+        device = x.device
+
+        # Build learnable asymmetric adjacency: [F, F]
+        # src_emb @ dst_emb.T models how variable j influences variable i
+        adj_raw = torch.matmul(self.src_emb, self.dst_emb.T)  # [F, F]
+        adj = torch.softmax(adj_raw, dim=-1)
+
+        # Convert adjacency to edge_index and differentiable edge_weight
+        # Build edge_index once from detached adjacency (topology is fixed,
+        # but edge weights carry gradients through the softmax)
+        with torch.no_grad():
+            adj_detached = adj.detach()
+            edge_index_np, _ = utils.tran_adm_to_edge_index(
+                adj_detached.cpu().numpy())
+            edge_index = edge_index_np.to(device)
+
+        # Build differentiable edge weights from adj
+        u, v = torch.nonzero(adj_detached > 1e-8, as_tuple=True)
+        edge_weight = adj[u, v]  # differentiable! [E]
+
+        # Reshape: each (time_step, variable) is a graph node
+        # [B, F, T] → [B, T, F] → [B*T*F, 1]
+        x = x.permute(0, 2, 1)  # [B, T, F]
+        x = x.reshape(B * T * F, 1)  # [B*T*F, 1]
+        x = self.var_proj(x).squeeze(-1)  # [B*T*F, D]
+
+        # Batch the variable graph: one F-node graph per (B*T) time steps
+        batched_edge = utils.batch_edge_index(edge_index, B * T, F)
+        batched_weight = edge_weight.repeat(B * T)
+
+        # GCNConv on disjoint union of (B*T) variable graphs
+        h = self.gcn1(x, batched_edge, batched_weight)  # [B*T*F, D]
+        h = self.norm1(h)
+        h = self.act(h)
+        h = self.gcn2(h, batched_edge, batched_weight)  # [B*T*F, D]
+        h = self.norm2(h)
+
+        # Aggregate variable nodes per time step: mean pooling
+        h = h.reshape(B * T, F, self.hidden_dim)  # [B*T, F, D]
+        h = h.mean(dim=1)  # [B*T, D] — one vector per time step
+
+        # Reshape back: [B*T, D] → [B, T, D]
+        h = h.reshape(B, T, self.hidden_dim)
+        return h
+
+
+class TemporalPositionEncoding(nn.Module):
+    """
+    Dual-scale temporal position encoding:
+    - Absolute PE: position within the 60-step lookback window
+    - Annual PE: day-of-year encoding for seasonal cycle
+    Both are added (not concatenated) to the input features.
+
+    Input:  x [B, T, D], doy_indices [B, T] (optional)
+    Output: x + pe [B, T, D]
+    """
+    def __init__(self, seq_len=60, hidden_dim=64):
+        super(TemporalPositionEncoding, self).__init__()
+        self.seq_len = seq_len
+        self.hidden_dim = hidden_dim
+
+        # Absolute position encoding (learnable, shared across samples)
+        self.abs_pe = nn.Parameter(torch.randn(1, seq_len, hidden_dim) * 0.02)
+
+    def forward(self, x, doy_indices=None):
+        # x: [B, T, D]
+        B, T, D = x.shape
+        # Absolute PE
+        out = x + self.abs_pe[:, :T, :]
+
+        # Annual PE (day-of-year encoding)
+        if doy_indices is not None:
+            annual_pe = utils.day_of_year_encoding(doy_indices, D).to(x.device)
+            out = out + annual_pe * 0.1  # scale down to avoid overwhelming features
+
+        return out
+
+
+class ResidualConv1D(nn.Module):
+    """
+    Simple 2-layer 1D convolution with residual connection.
+    Replaces the buggy Twodimension_TCNLayer (which used 2D conv on batch dim).
+
+    Input:  [B, T, D]
+    Output: [B, T, D] (same shape)
+    """
+    def __init__(self, channels=64, kernel_size=3, dropout=0.2):
+        super(ResidualConv1D, self).__init__()
+        self.conv1 = nn.Conv1d(channels, channels, kernel_size,
+                               padding=kernel_size // 2, padding_mode='replicate')
+        self.conv2 = nn.Conv1d(channels, channels, kernel_size,
+                               padding=kernel_size // 2, padding_mode='replicate')
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        # x: [B, T, D] → [B, D, T]
+        residual = x
+        x_t = x.permute(0, 2, 1)  # [B, D, T]
+        out = self.conv1(x_t)
+        out = self.relu(out)
+        out = self.dropout(out)
+        out = self.conv2(out)
+        out = self.dropout(out)
+        out = out + x_t  # residual
+        return out.permute(0, 2, 1)  # [B, T, D]
+
+
+class MultiStepPredictionHead(nn.Module):
+    """
+    MLP prediction head: takes the last time step's representation
+    and projects to multiple future steps.
+
+    Input:  h [B, D] — representation at the last time step
+    Output: [B, pred_len]
+    """
+    def __init__(self, input_dim=64, hidden_dim=128, pred_len=4, dropout=0.1):
+        super(MultiStepPredictionHead, self).__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, pred_len),
+        )
+
+    def forward(self, h):
+        # h: [B, D]
+        return self.mlp(h)  # [B, pred_len]
+
+
+class BranchAggregator(nn.Module):
+    """
+    Aggregates two branch outputs (each [B, D]) into a single representation.
+    Supports three fusion modes: softmax, linear, min_distance.
+
+    Input:  h1 [B, D], h2 [B, D]
+    Output: [B, D]
+    """
+    def __init__(self, hidden_dim=64, agg_type='softmax'):
+        super(BranchAggregator, self).__init__()
+        self.agg_type = agg_type
+        self.hidden_dim = hidden_dim
+        self.num_branches = 2
+
+        # Softmax: learnable weight per branch
+        self.weight_layer = nn.Linear(hidden_dim * self.num_branches, self.num_branches)
+
+        # Linear: project concatenated features
+        self.fusion = nn.Sequential(
+            nn.Linear(hidden_dim * self.num_branches, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+
+    def forward(self, h1, h2):
+        # h1, h2: [B, D]
+        if self.agg_type == 'softmax':
+            concat = torch.cat([h1, h2], dim=-1)  # [B, 2D]
+            weights = self.weight_layer(concat)  # [B, 2]
+            weights = F.softmax(weights, dim=-1).unsqueeze(-1)  # [B, 2, 1]
+            stacked = torch.stack([h1, h2], dim=1)  # [B, 2, D]
+            output = (weights * stacked).sum(dim=1)  # [B, D]
+
+        elif self.agg_type == 'linear':
+            concat = torch.cat([h1, h2], dim=-1)  # [B, 2D]
+            output = self.fusion(concat)  # [B, D]
+
+        elif self.agg_type == 'mean':
+            output = (h1 + h2) / 2.0
+
+        else:
+            raise ValueError(f"Unknown agg_type: {self.agg_type}. "
+                             f"Choose from ['softmax', 'linear', 'mean'].")
+
         return output

@@ -15,6 +15,7 @@ import math
 from sklearn.metrics import r2_score
 from torch.utils.data import Dataset
 import layer
+import utils
 
 class dayGNNnet(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim, edge_weight, feature):
@@ -196,6 +197,10 @@ class YearGNNnet(nn.Module):
         return x_amgnn2
 
 class MTTGNet(nn.Module):
+    """
+    [DEPRECATED — use MTTGNetv2 instead]
+    Kept for backward compatibility with old checkpoints.
+    """
     def __init__(self, w_daily, w_yearly, feature, input_dim=60, hidden_dim=64, output_dim=1, aggregator_type='softmax'):
         super(MTTGNet, self).__init__()
         self.input_dim = input_dim
@@ -215,4 +220,163 @@ class MTTGNet(nn.Module):
         x_daily = self.daygnn(x, index_daily)
         x_yearly = self.yeargnn(x, index_yearly)
         output = self.aggregator(x1=x_daily, x2=x_yearly, input=x)
+        return output
+
+
+# ==================== MTTGNet v2 Architecture ====================
+
+class DayBranch(nn.Module):
+    """
+    Day-scale branch: models short-range weather dynamics (hours to days).
+    - Variable interaction: learnable adjacency over 8 atmospheric variables
+    - Temporal graph: edges i↔i+1 (adjacent 6h), i↔i+4 (same time next day)
+    - Convolution: ResidualConv1D for local pattern extraction
+    """
+    def __init__(self, num_vars=8, hidden_dim=64, seq_len=60):
+        super(DayBranch, self).__init__()
+        self.hidden_dim = hidden_dim
+        self.seq_len = seq_len
+
+        self.var_interact = layer.VariableInteraction(num_vars, hidden_dim)
+        self.pos_enc = layer.TemporalPositionEncoding(seq_len, hidden_dim)
+        self.amgnn_front = layer.AMGNNLayer(hidden_dim, hidden_dim, hidden_dim)
+        self.conv = layer.ResidualConv1D(hidden_dim)
+        self.amgnn_back = layer.AMGNNLayer(hidden_dim, hidden_dim, hidden_dim)
+
+        # Day temporal graph: period=4 (24-hour cycle at 6-hourly sampling)
+        self.register_buffer(
+            'temporal_graph',
+            utils.build_temporal_graph(seq_len, period_steps=4, self_loop=True)
+        )
+
+    def forward(self, x, doy_indices=None):
+        # x: [B, F, T]
+        B, _, T = x.shape
+
+        # 1. Variable interaction
+        h = self.var_interact(x)  # [B, T, D]
+
+        # 2. Position encoding
+        h = self.pos_enc(h, doy_indices)  # [B, T, D]
+
+        # 3. AMGNN (front) — batch the temporal graph
+        batched_edges = utils.batch_edge_index(self.temporal_graph, B, T)
+        h = self.amgnn_front(h.reshape(B * T, self.hidden_dim), batched_edges, 'front')
+        h = h.reshape(B, T, self.hidden_dim)
+
+        # 4. Temporal convolution
+        h = self.conv(h)  # [B, T, D]
+
+        # 5. AMGNN (back)
+        batched_edges = utils.batch_edge_index(self.temporal_graph, B, T)
+        h = self.amgnn_back(h.reshape(B * T, self.hidden_dim), batched_edges, 'back')
+        h = h.reshape(B, T, self.hidden_dim)
+
+        return h  # [B, T, D]
+
+
+class YearBranch(nn.Module):
+    """
+    Year-scale branch: models long-range climate dynamics (weeks to seasons).
+    - Variable interaction: separate learnable adjacency (different from DayBranch)
+    - Temporal graph: edges i↔i+1, i↔i+28 (~weekly context)
+    - Convolution: ResidualConv1D (same structure as DayBranch; differentiation
+      comes from the wider-period temporal graph and independent variable adjacency)
+    """
+    def __init__(self, num_vars=8, hidden_dim=64, seq_len=60):
+        super(YearBranch, self).__init__()
+        self.hidden_dim = hidden_dim
+        self.seq_len = seq_len
+
+        self.var_interact = layer.VariableInteraction(num_vars, hidden_dim)
+        self.pos_enc = layer.TemporalPositionEncoding(seq_len, hidden_dim)
+        self.amgnn_front = layer.AMGNNLayer(hidden_dim, hidden_dim, hidden_dim)
+        self.conv = layer.ResidualConv1D(hidden_dim)
+        self.amgnn_back = layer.AMGNNLayer(hidden_dim, hidden_dim, hidden_dim)
+
+        # Year temporal graph: period=28 (~weekly context at 6-hourly sampling)
+        self.register_buffer(
+            'temporal_graph',
+            utils.build_temporal_graph(seq_len, period_steps=28, self_loop=True)
+        )
+
+    def forward(self, x, doy_indices=None):
+        # x: [B, F, T]
+        B, _, T = x.shape
+
+        # 1. Variable interaction
+        h = self.var_interact(x)  # [B, T, D]
+
+        # 2. Position encoding
+        h = self.pos_enc(h, doy_indices)  # [B, T, D]
+
+        # 3. AMGNN (front)
+        batched_edges = utils.batch_edge_index(self.temporal_graph, B, T)
+        h = self.amgnn_front(h.reshape(B * T, self.hidden_dim), batched_edges, 'front')
+        h = h.reshape(B, T, self.hidden_dim)
+
+        # 4. Temporal convolution
+        h = self.conv(h)  # [B, T, D]
+
+        # 5. AMGNN (back)
+        batched_edges = utils.batch_edge_index(self.temporal_graph, B, T)
+        h = self.amgnn_back(h.reshape(B * T, self.hidden_dim), batched_edges, 'back')
+        h = h.reshape(B, T, self.hidden_dim)
+
+        return h  # [B, T, D]
+
+
+class MTTGNetv2(nn.Module):
+    """
+    Multivariate Multi-period Temperature Time Series Graph Neural Network v2.
+
+    Architecture:
+    1. DayBranch: short-range weather dynamics (daily cycle)
+    2. YearBranch: long-range climate dynamics (seasonal context)
+    3. BranchAggregator: fuse the two branch representations
+    4. MultiStepPredictionHead: project to multiple future steps
+
+    Args:
+        num_vars: number of input variables (default 8)
+        hidden_dim: hidden dimension (default 64)
+        seq_len: lookback sequence length (default 60)
+        pred_len: prediction horizon steps (default 4 = 24 hours)
+        aggregator_type: fusion mode ['softmax', 'linear', 'mean']
+    """
+    def __init__(self, num_vars=8, hidden_dim=64, seq_len=60, pred_len=4,
+                 aggregator_type='softmax'):
+        super(MTTGNetv2, self).__init__()
+        self.num_vars = num_vars
+        self.hidden_dim = hidden_dim
+        self.seq_len = seq_len
+        self.pred_len = pred_len
+
+        self.day_branch = DayBranch(num_vars, hidden_dim, seq_len)
+        self.year_branch = YearBranch(num_vars, hidden_dim, seq_len)
+        self.aggregator = layer.BranchAggregator(hidden_dim, aggregator_type)
+        self.pred_head = layer.MultiStepPredictionHead(hidden_dim, 128, pred_len)
+
+    def forward(self, x, doy_indices=None):
+        """
+        Args:
+            x: [B, F, T] — input time series batch
+            doy_indices: [B, T] — day-of-year indices (optional, for seasonal PE)
+
+        Returns:
+            output: [B, pred_len] — multi-step predictions
+        """
+        # 1. Process through day and year branches
+        h_day = self.day_branch(x, doy_indices)    # [B, T, D]
+        h_year = self.year_branch(x, doy_indices)  # [B, T, D]
+
+        # 2. Take representation at the last time step
+        h_day_last = h_day[:, -1, :]    # [B, D]
+        h_year_last = h_year[:, -1, :]  # [B, D]
+
+        # 3. Aggregate the two branch representations
+        h_fused = self.aggregator(h_day_last, h_year_last)  # [B, D]
+
+        # 4. Multi-step prediction
+        output = self.pred_head(h_fused)  # [B, pred_len]
+
         return output
