@@ -1,0 +1,73 @@
+# =============================================================================
+#  EXAMPLE CONFIG -- monthly two-variable configuration, the recipe run_mttgnet_projections.py defaults to
+#
+#  This is a template, not a record of a paper run.  To use it:
+#    1. put your prepared series at `data/processed/` (see README, "Data format")
+#       or edit `data.values_path` / `data.timestamps_path` below;
+#    2. run   python run_model.py configs/example_monthly.yaml
+#    3. outputs land in `outputs/<config-stem>_s<seed>/` (see `output.checkpoint_dir`).
+#
+#  Every key under `model_params` is read by src/mttgnet.py.  A key that the code
+#  does not forward is swallowed by `**kwargs`, so `src`'s runner asserts that all
+#  wrapper parameters are passed -- if you add one, add it to the runner too.
+# =============================================================================
+model_type: mttgnet
+seed: 123
+device: cuda
+data:
+  values_path: data/processed/hadcrut5_values.npy
+  timestamps_path: data/processed/hadcrut5_timestamps.npy
+  target_index: 0
+  co2_index: 1
+  # Columns: [0] anomaly (degC)  [1] CMIP6 historical CO2 (ppm)
+split:
+  # Data range: 1850-01 → 2014-12  (aligned to CMIP6 historical CO2 end)
+  train_end: '1990-12-15 00:00:00'
+  val_end: '2004-12-15 00:00:00'
+  test_end: '2014-12-15 00:00:00'
+dataset:
+  recent_length: 60
+  horizon: 1
+  daily_anchors: 0
+  yearly_anchors: 0
+  train_step_size: 1
+  eval_step_size: 1
+  time_encode: true
+model_params:
+  hidden_dim: 32
+  dropout: 0.1
+  memory_slots: 64
+  mem_top_k: 4
+  num_gru_layers: 1
+  use_memory: true
+  use_var_gnn: true
+  use_variable_encoder: true
+  use_shift_encoder: true
+  use_time_bias: true
+  use_gate: true
+  var_encoder_type: "gat"
+  use_calendar: true
+  temporal_encoder: "gru"
+training:
+  batch_size: 64
+  epochs: 10000
+  learning_rate: 0.0001
+  weight_decay: 0.0005
+  lr_decay: 5.0e-06
+  lr_min: 1.0e-05
+  patience: 1000
+  early_stop_min_delta: 0.0005
+  gradient_clip: 1.0
+  num_workers: 4
+  pin_memory: true
+  use_amp: true
+  grad_accum_steps: 1
+loss:
+  delta_weight: 0.1
+  horizon_weight_power: 1.0
+  horizon_weight_max: 1.5
+  extreme_weight: 0.0
+  extreme_threshold: 1.5
+output:
+  checkpoint_dir: outputs/mttgnet_hadcrut5/checkpoints
+  result_dir: outputs/mttgnet_hadcrut5/results

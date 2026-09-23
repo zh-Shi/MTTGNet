@@ -1,0 +1,19 @@
+# Core runtime -- everything needed to train and evaluate MTTGNet.
+numpy>=1.24
+pandas>=2.0
+scipy>=1.10
+PyYAML>=6.0
+torch>=2.0
+tqdm>=4.65
+
+# The reported runs used Python 3.10, torch 2.1.2+cu121, on a single NVIDIA GPU.
+# The H=28 configuration needs roughly 4 GB of GPU memory at batch size 64.
+
+# ---------------------------------------------------------------------------
+# Only needed by the raw-data preparation scripts
+# (scripts/prepare_datasets.py's netCDF pass, scripts/prepare_cmip6_tas.py,
+# scripts/download_cmip6_tas.py).  You do not need these if you already have
+# prepared .npy series -- see the README section "Data format".
+# ---------------------------------------------------------------------------
+# xarray>=2023.1
+# netCDF4>=1.6

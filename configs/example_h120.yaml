@@ -1,0 +1,74 @@
+# =============================================================================
+#  EXAMPLE CONFIG -- 30-day horizon (H=120), the compact variant used for the long horizon
+#
+#  This is a template, not a record of a paper run.  To use it:
+#    1. put your prepared series at `data/processed/` (see README, "Data format")
+#       or edit `data.values_path` / `data.timestamps_path` below;
+#    2. run   python run_model.py configs/example_h120.yaml
+#    3. outputs land in `outputs/<config-stem>_s<seed>/` (see `output.checkpoint_dir`).
+#
+#  Every key under `model_params` is read by src/mttgnet.py.  A key that the code
+#  does not forward is swallowed by `**kwargs`, so `src`'s runner asserts that all
+#  wrapper parameters are passed -- if you add one, add it to the runner too.
+# =============================================================================
+model_type: mttgnet
+seed: 123
+device: cuda
+data:
+  values_path: data/processed/weather_values_D.npy
+  timestamps_path: data/processed/weather_timestamps_D.npy
+  target_index: 0
+  co2_index: 1
+split:
+  train_end: '2018-12-31 18:00:00'
+  val_end: '2020-12-31 18:00:00'
+  test_end: '2024-12-31 18:00:00'
+dataset:
+  recent_length: 120
+  horizon: 120
+  daily_anchors: 7
+  yearly_anchors: 3
+  train_step_size: 1
+  eval_step_size: 1
+  time_encode: true
+model_params:
+  hidden_dim: 64
+  dropout: 0.25
+  memory_slots: 128
+  mem_top_k: 8
+  num_gru_layers: 2
+  use_memory: false            # ← the one change: drop prototype memory
+  use_var_gnn: true
+  use_variable_encoder: true
+  use_shift_encoder: true
+  use_time_bias: true
+  use_gate: true
+  use_calendar: true
+  use_multirate: true
+  multirate_pool: 4
+  var_encoder_type: "gat"
+training:
+  batch_size: 64
+  epochs: 80
+  learning_rate: 0.0001
+  weight_decay: 0.0005
+  lr_decay: 1.0e-05
+  lr_min: 5.0e-05
+  patience: 12
+  early_stop_min_delta: 0.001
+  gradient_clip: 1.0
+  num_workers: 10
+  pin_memory: true
+  use_amp: true
+  grad_accum_steps: 1
+loss:
+  delta_weight: 0.1
+  horizon_weight_power: 1.0
+  horizon_weight_max: 1.5
+  short_lead_loss_steps: 8
+  short_lead_loss_weight: 0.8
+  extreme_weight: 0.0
+  extreme_threshold: 1.5
+output:
+  checkpoint_dir: outputs/example_h120/checkpoints
+  result_dir: outputs/example_h120/results

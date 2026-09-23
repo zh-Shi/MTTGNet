@@ -1,0 +1,9 @@
+# Normalise line endings so the repository is usable from Linux, macOS and Windows.
+* text=auto eol=lf
+
+# Binary assets, if any are ever added.
+*.png binary
+*.jpg binary
+*.npz binary
+*.npy binary
+*.pt  binary

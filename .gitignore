@@ -1,0 +1,43 @@
+# ---- data: never committed (see README "Data format") ----------------------
+data/
+/data/
+*.npy
+*.npz
+*.nc
+*.csv
+
+# ---- run artefacts --------------------------------------------------------
+outputs/
+result/
+runs/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+
+# ---- figures --------------------------------------------------------------
+fig/
+fig_new/
+*.png
+*.jpg
+*.pdf
+
+# ---- IDE / editor ---------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# ---- python ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+.pytest_cache/
+
+# ---- local scratch --------------------------------------------------------
+paper.txt
+paper.md
+*.bak
+*.bak_*
+tensorboard/
