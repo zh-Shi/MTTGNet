@@ -12,6 +12,9 @@ from __future__ import annotations
 import gc
 from collections.abc import Iterable
 from pathlib import Path
+import json
+import hashlib
+import time
 from typing import Callable
 
 import numpy as np
@@ -368,7 +371,12 @@ class Trainer:
 
         # Scaler
         train_end = pd.Timestamp(cfg["split"]["train_end"])
-        self.scaler = StandardScaler().fit(values[timestamps <= train_end])
+        scaler_values = values
+        if cfg['data'].get('scaler_fit_values_path'):
+            scaler_values = np.load(_resolve(cfg['data']['scaler_fit_values_path'])).astype(np.float32)
+            if scaler_values.shape != values.shape:
+                raise ValueError('Scaler reference and input shapes differ')
+        self.scaler = StandardScaler().fit(scaler_values[timestamps <= train_end])
         values_s = self.scaler.transform(values).astype(np.float32)
         # Fix CO2 column with [0,1] normalization using a fixed range
         # (280–1200 ppm).  Z-scoring to training stats makes test-period
@@ -403,10 +411,19 @@ class Trainer:
                       # Only when use_future_co2 is on: the dataset then also
                       # emits the CO2 at every target step.  Default None keeps
                       # every existing config byte-identical.
-                      co2_index=co2_idx if dataset_cfg.get("use_future_co2") else None)
+                      co2_index=co2_idx if dataset_cfg.get("use_future_co2") else None,
+                      anchor_cache_dir=dataset_cfg.get('anchor_cache_dir'))
+        test_ds = PeriodicAnchorDataset(origin_indices=test_origins, **common)
+
+        if dataset_cfg.get('evaluation_only', False):
+            self.num_features = test_ds.num_features
+            self.loaders['test'] = DataLoader(test_ds, batch_size=cfg['training']['batch_size'],
+                    shuffle=False, num_workers=cfg['training'].get('num_workers', 0),
+                    pin_memory=cfg['training'].get('pin_memory', False), worker_init_fn=_worker_init_fn)
+            return
+
         train_ds = PeriodicAnchorDataset(origin_indices=train_origins, **common)
         val_ds = PeriodicAnchorDataset(origin_indices=val_origins, **common)
-        test_ds = PeriodicAnchorDataset(origin_indices=test_origins, **common)
 
         # num_features may have changed due to time encoding
         self.num_features = train_ds.num_features
@@ -522,8 +539,16 @@ class Trainer:
         best_val = float("inf")
         patience_counter = 0
         train_losses, val_losses = [], []
+        max_seconds = train_cfg.get('max_training_seconds')
+        if max_seconds is not None and (not np.isfinite(max_seconds) or max_seconds <= 0):
+            raise ValueError('max_training_seconds must be finite and positive')
+        deadline = time.monotonic() + max_seconds if max_seconds is not None else None
+        self.training_stop_reason = 'epoch_cap'
 
         for epoch in range(1, epochs + 1):
+            if deadline is not None and time.monotonic() >= deadline:
+                self.training_stop_reason = 'budget_exhausted'
+                break
             current_lr = optimizer.param_groups[0]["lr"]
 
             # Train
@@ -565,12 +590,14 @@ class Trainer:
             if improved:
                 best_val = val_result["loss"]
                 patience_counter = 0
+                checkpoint_tmp = checkpoint_dir / 'best_model.pt.tmp'
                 torch.save({
                     "model_state_dict": model.state_dict(),
                     "config": self.config,
                     "best_val_loss": best_val,
                     "epoch": epoch,
-                }, checkpoint_dir / "best_model.pt")
+                }, checkpoint_tmp)
+                checkpoint_tmp.replace(checkpoint_dir / 'best_model.pt')
             else:
                 patience_counter += 1
                 # ── plateau lr decay ──
@@ -579,6 +606,7 @@ class Trainer:
                         pg["lr"] = max(lr_min, pg["lr"] - lr_decay)
 
             if patience_counter >= patience_val:
+                self.training_stop_reason = 'early_stopping'
                 tqdm.write(f"Early stopping at epoch {epoch}")
                 break
 
@@ -586,6 +614,8 @@ class Trainer:
                 torch.cuda.empty_cache()
 
         # Load best
+        if not train_losses:
+            raise TimeoutError('Training budget expired before the first epoch')
         ckpt = torch.load(checkpoint_dir / "best_model.pt", map_location=device, weights_only=True)
         model.load_state_dict(ckpt["model_state_dict"])
         print(f"Best val loss: {best_val:.6f}")
@@ -636,6 +666,10 @@ class Trainer:
         """Save .npy + summary.txt, return metrics dict."""
         result_dir = result_dir_override or _project_root_path(self.config["output"]["result_dir"])
         result_dir.mkdir(parents=True, exist_ok=True)
+        pred = np.asarray(pred, dtype=np.float64)
+        target = np.asarray(target, dtype=np.float64)
+        if pred.shape != target.shape or pred.ndim != 2 or not np.isfinite(pred).all() or not np.isfinite(target).all():
+            raise ValueError('Invalid prediction/target arrays; refusing to save')
 
         np.save(result_dir / "test_predict.npy", pred)
         np.save(result_dir / "test_target.npy", target)
@@ -657,13 +691,33 @@ class Trainer:
             np.save(result_dir / "val_losses.npy", np.array(val_losses))
 
         # Scaler
-        if self.scaler is not None:
+        if self.scaler is not None and self.config['output'].get('legacy_scaler_export', True):
             scaler_dir = Path(__file__).resolve().parent.parent / "data/scalers"
             scaler_dir.mkdir(parents=True, exist_ok=True)
             np.save(scaler_dir / "weather_mean.npy", self.scaler.mean)
             np.save(scaler_dir / "weather_std.npy", self.scaler.std)
 
         overall_rmse = float(np.sqrt(np.mean((pred - target) ** 2)))
+        np.testing.assert_allclose(overall_rmse, np.sqrt(np.mean(hm['rmse']**2)), atol=1e-8, rtol=1e-7)
+        (result_dir/'config.json').write_text(json.dumps(self.config,indent=2,default=str),encoding='utf-8')
+        if self.scaler is not None:
+            np.savez(result_dir/'scaler.npz',mean=self.scaler.mean,std=self.scaler.std)
+        loader = self.loaders.get('test')
+        if loader is not None:
+            ds = loader.dataset
+            datasets = list(ds.datasets) if hasattr(ds,'datasets') else [ds]
+            if all(hasattr(d,'origin_indices') and hasattr(d,'timestamps') for d in datasets):
+                origin_times = np.concatenate([np.asarray(d.timestamps)[d.origin_indices] for d in datasets])
+                target_times = np.concatenate([np.asarray(d.timestamps)[d.origin_indices[:,None]+np.arange(1,d.horizon+1)[None,:]] for d in datasets])
+                if target_times.shape != target.shape:
+                    raise ValueError('Evaluation/timestamp alignment mismatch')
+                np.save(result_dir/'test_origin_timestamps.npy',origin_times.astype('datetime64[ns]'))
+                np.save(result_dir/'test_target_timestamps.npy',target_times.astype('datetime64[ns]'))
+        metadata = {'version': 'one-pass-v2', 'shape': list(pred.shape),
+                    'overall_rmse': overall_rmse,
+                    'predict_sha256': hashlib.sha256((result_dir/'test_predict.npy').read_bytes()).hexdigest(),
+                    'target_sha256': hashlib.sha256((result_dir/'test_target.npy').read_bytes()).hexdigest()}
+        (result_dir/'metrics_manifest.json').write_text(json.dumps(metadata,indent=2),encoding='utf-8')
         # Pooled R² (consistent with pooled RMSE) — previously the mean of
         # per-horizon R², which disagreed with run_experiments' pooled R².
         _ss_tot = float(((target - target.mean()) ** 2).sum())

@@ -1,43 +1,40 @@
-# ---- data: never committed (see README "Data format") ----------------------
+# Source data and model/results files stay local.
 data/
-/data/
 *.npy
 *.npz
 *.nc
 *.csv
-
-# ---- run artefacts --------------------------------------------------------
 outputs/
+output/
 result/
 runs/
 checkpoints/
 *.pt
 *.pth
 *.ckpt
-
-# ---- figures --------------------------------------------------------------
 fig/
-fig_new/
 *.png
 *.jpg
 *.pdf
-
-# ---- IDE / editor ---------------------------------------------------------
+paper/
+paper.txt
+paper.md
+cite.bib
+docs/
+logs/
+tmp/
+_archive/
+contrast_model/
+# Local configuration and caches.
+.env
+.env.*
+.venv/
 .idea/
 .vscode/
-*.swp
-.DS_Store
-
-# ---- python ---------------------------------------------------------------
 __pycache__/
 *.py[cod]
 *.egg-info/
-.ipynb_checkpoints/
 .pytest_cache/
-
-# ---- local scratch --------------------------------------------------------
-paper.txt
-paper.md
 *.bak
 *.bak_*
-tensorboard/
+.DS_Store

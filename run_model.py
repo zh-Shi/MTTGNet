@@ -36,63 +36,107 @@ CONFIG = "configs/example_h28.yaml"
 
 def run_one(config_path: str, warmstart: str | None = None) -> None:
     cfg = load_config(Path(__file__).resolve().parent / config_path)
+    from src.fusion_config import record_fusion_config
+    record_fusion_config(cfg, default_use_memory=False)
     seed_everything(cfg.get("seed", 233))
 
     trainer = Trainer(cfg)
     device = trainer.device
     m = cfg.get("model_params", {})
     ds = cfg["dataset"]
-    model = MTTGNetWrapper(
-        num_features=trainer.num_features,
-        hidden_dim=m.get("hidden_dim", 96),
-        horizon=ds["horizon"],
-        seq_len=ds["recent_length"],
-        dropout=m.get("dropout", 0.15),
-        memory_slots=m.get("memory_slots", 128),
-        mem_top_k=m.get("mem_top_k", 8),
-        num_gru_layers=m.get("num_gru_layers", 3),
-        use_gate=m.get("use_gate", True),
-        use_time_bias=m.get("use_time_bias", True),
-        use_memory=m.get("use_memory", True),
-        use_variable_encoder=m.get("use_variable_encoder", True),
-        use_shift_encoder=m.get("use_shift_encoder", True),
-        use_var_gnn=m.get("use_var_gnn", True),
-        use_calendar=m.get("use_calendar", True),
-        temporal_encoder=m.get("temporal_encoder", "gru"),
-        var_encoder_type=m.get("var_encoder_type", "attention"),
-        gat_version=m.get("gat_version", "gat"),
-        co2_index=cfg.get("data", {}).get("co2_index", 1),
-        # CO2 is already [0,1] normalized by the trainer (280–1200 ppm).
-        # Identity pass-through in shift_encoder.
-        co2_mean=0.0, co2_std=1.0, co2_min=0.0, co2_max=1.0,
-        # ── innovations (config-driven; default off) ──
-        probabilistic=m.get("probabilistic", False),
-        sigma_floor=m.get("sigma_floor", 1e-3),
-        use_mono_reg=m.get("use_mono_reg", False),
-        mono_weight=m.get("mono_weight", 0.1),
-        mono_delta=m.get("mono_delta", 0.05),
-        mono_margin=m.get("mono_margin", 0.0),
-        use_co2_timebias=m.get("use_co2_timebias", False),
-        use_short_residual=m.get("use_short_residual", False),
-        target_index=cfg.get("data", {}).get("target_index", 0),
-        short_residual_steps=m.get("short_residual_steps", 8),
-        decoder_type=m.get("decoder_type", "calendar_mlp"),
-        use_persist_blend=m.get("use_persist_blend", False),
-        persist_blend_steps=m.get("persist_blend_steps", 8),
-        lead_anchor_scale=m.get("lead_anchor_scale", False),
-        anchor_scale_min=m.get("anchor_scale_min", 0.3),
-        use_dual_forecast=m.get("use_dual_forecast", False),
-        dual_short_steps=m.get("dual_short_steps", 8),
-        use_multirate=m.get("use_multirate", False),
-        multirate_pool=m.get("multirate_pool", 4),
-        use_multiband=m.get("use_multiband", False),
-        band_pool1=m.get("band_pool1", 2),
-        band_pool2=m.get("band_pool2", 8),
-        time_bias_scale=m.get("time_bias_scale", 1.0),
-        shift_bias_scale=m.get("shift_bias_scale", 1.0),
-        use_analog_memory=m.get("use_analog_memory", False),
-        analog_top_k=m.get("analog_top_k", 8),
-        analog_temperature=m.get("analog_temperature", 1.0),
+    if m.get("arch", "mttgnet") == "clean":
+        # Paper (clean) architecture: src/mttgnet_test.py.  The clean switches
+        # must be forwarded explicitly — the wrapper has no legacy defaults.
+        from src.mttgnet_test import MTTGNetTestWrapper
+        model = MTTGNetTestWrapper(
+            num_features=trainer.num_features,
+            hidden_dim=m.get("hidden_dim", 96),
+            horizon=ds["horizon"],
+            seq_len=ds["recent_length"],
+            dropout=m.get("dropout", 0.15),
+            memory_slots=m.get("memory_slots", 128),
+            mem_top_k=m.get("mem_top_k", 8),
+            num_gru_layers=m.get("num_gru_layers", 2),
+            use_gate=m.get("use_gate", True),
+            use_time_bias=m.get("use_time_bias", True),
+            use_memory=m.get("use_memory", False),
+            use_variable_encoder=m.get("use_variable_encoder", True),
+            use_shift_encoder=m.get("use_shift_encoder", True),
+            use_var_gnn=m.get("use_var_gnn", True),
+            use_calendar=m.get("use_calendar", True),
+            var_encoder_type=m.get("var_encoder_type", "gat"),
+            co2_index=cfg.get("data", {}).get("co2_index", 1),
+            co2_mean=0.0, co2_std=1.0,
+            co2_min=m.get("co2_min", 280.0), co2_max=m.get("co2_max", 1200.0),
+            query_refine=m.get("query_refine", False),
+            mem_clean=m.get("mem_clean", True),
+            decoder_bypass=m.get("decoder_bypass", False),
+            time_bias_mode=m.get("time_bias_mode", "additive"),
+            co2_mode=m.get("co2_mode", "counterfactual"),
+            use_mono_reg=m.get("use_mono_reg", False),
+            mono_weight=m.get("mono_weight", 0.1),
+            use_co2_timebias=m.get("use_co2_timebias", False),
+            target_index=cfg.get("data", {}).get("target_index", 0),
+            use_future_co2=ds.get("use_future_co2", False),
+            co2_attention_modulation=m.get('co2_attention_modulation',True),
+            co2_additive_bias=m.get('co2_additive_bias',True),
+            fusion_sources=m['fusion_sources'],
+        ).to(device)
+    else:
+        model = MTTGNetWrapper(
+            num_features=trainer.num_features,
+            hidden_dim=m.get("hidden_dim", 96),
+            horizon=ds["horizon"],
+            seq_len=ds["recent_length"],
+            dropout=m.get("dropout", 0.15),
+            memory_slots=m.get("memory_slots", 128),
+            mem_top_k=m.get("mem_top_k", 8),
+            num_gru_layers=m.get("num_gru_layers", 3),
+            use_gate=m.get("use_gate", True),
+            use_time_bias=m.get("use_time_bias", True),
+            use_memory=m.get("use_memory", True),
+            use_variable_encoder=m.get("use_variable_encoder", True),
+            use_shift_encoder=m.get("use_shift_encoder", True),
+            use_var_gnn=m.get("use_var_gnn", True),
+            use_calendar=m.get("use_calendar", True),
+            temporal_encoder=m.get("temporal_encoder", "gru"),
+            var_encoder_type=m.get("var_encoder_type", "attention"),
+            gat_version=m.get("gat_version", "gat"),
+            co2_index=cfg.get("data", {}).get("co2_index", 1),
+            # CO2 is already [0,1] normalized by the trainer (280–1200 ppm).
+            # Identity pass-through in shift_encoder by default; a config that
+            # enables use_multiscale_co2 / co2_anchor_a must override with the real
+            # ppm range (co2_min: 280, co2_max: 1200) or model init will refuse.
+            co2_mean=0.0, co2_std=1.0,
+            co2_min=m.get("co2_min", 0.0), co2_max=m.get("co2_max", 1.0),
+            # ── innovations (config-driven; default off) ──
+            probabilistic=m.get("probabilistic", False),
+            sigma_floor=m.get("sigma_floor", 1e-3),
+            use_mono_reg=m.get("use_mono_reg", False),
+            mono_weight=m.get("mono_weight", 0.1),
+            mono_delta=m.get("mono_delta", 0.05),
+            mono_margin=m.get("mono_margin", 0.0),
+            use_co2_timebias=m.get("use_co2_timebias", False),
+            use_short_residual=m.get("use_short_residual", False),
+            target_index=cfg.get("data", {}).get("target_index", 0),
+            short_residual_steps=m.get("short_residual_steps", 8),
+            decoder_type=m.get("decoder_type", "calendar_mlp"),
+            use_persist_blend=m.get("use_persist_blend", False),
+            persist_blend_steps=m.get("persist_blend_steps", 8),
+            lead_anchor_scale=m.get("lead_anchor_scale", False),
+            anchor_scale_min=m.get("anchor_scale_min", 0.3),
+            use_dual_forecast=m.get("use_dual_forecast", False),
+            dual_short_steps=m.get("dual_short_steps", 8),
+            use_multirate=m.get("use_multirate", False),
+            multirate_pool=m.get("multirate_pool", 4),
+            use_multiband=m.get("use_multiband", False),
+            band_pool1=m.get("band_pool1", 2),
+            band_pool2=m.get("band_pool2", 8),
+            time_bias_scale=m.get("time_bias_scale", 1.0),
+            shift_bias_scale=m.get("shift_bias_scale", 1.0),
+            use_analog_memory=m.get("use_analog_memory", False),
+            analog_top_k=m.get("analog_top_k", 8),
+            analog_temperature=m.get("analog_temperature", 1.0),
     ).to(device)
 
     n_params = sum(p.numel() for p in model.parameters())

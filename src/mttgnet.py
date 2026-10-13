@@ -306,13 +306,18 @@ class AnchorVariableEncoder(nn.Module):
         super().__init__()
         self.var_encoder_type = var_encoder_type
 
-        if var_encoder_type in ("gat",):
+        if var_encoder_type in ("gat", "gat_compact"):
             # Lazy import — layers.py is a heavy module, only load when needed
             from .layers import GATVariableEncoder
             self._gat_encoder = GATVariableEncoder(
                 num_features, hidden_dim, num_heads, dropout, gat_version)
         else:
             self._gat_encoder = None
+        if var_encoder_type == 'gat_compact':
+            self.num_features = num_features
+            self.hidden_dim = hidden_dim
+            self._mlp_mixer = None
+            return
 
         if hidden_dim % num_heads != 0:
             raise ValueError("hidden_dim must be divisible by num_heads")
@@ -329,10 +334,30 @@ class AnchorVariableEncoder(nn.Module):
             nn.Linear(hidden_dim, 4 * hidden_dim), nn.GELU(),
             nn.Dropout(dropout), nn.Linear(4 * hidden_dim, hidden_dim))
         self.pool_score = nn.Linear(hidden_dim, 1)
+        self._mlp_mixer = None
+        if var_encoder_type == 'mlp_matched':
+            from .layers import GATVariableEncoder
+            reference = GATVariableEncoder(num_features,hidden_dim,num_heads,dropout,gat_version)
+            budget = sum(p.numel() for p in reference.parameters())
+            width = max(1, round((budget-3*hidden_dim)/(num_features+hidden_dim+1)))
+            self._mlp_mixer = nn.Sequential(nn.Linear(num_features,width),nn.GELU(),nn.Dropout(dropout),nn.Linear(width,hidden_dim),nn.LayerNorm(hidden_dim))
+            for name in ('value_projection','variable_embedding','attention','norm1','norm2','feed_forward','pool_score'):
+                delattr(self,name)
+        elif var_encoder_type == 'attention_matched':
+            # GAT and dense attention share embeddings/pooling/FFN. Match the
+            # active parameter difference with useful FFN units, not dummy weights.
+            width = max(1,4*hidden_dim-round(2*hidden_dim/(2*hidden_dim+1)))
+            self.feed_forward = nn.Sequential(nn.Linear(hidden_dim,width),nn.GELU(),nn.Dropout(dropout),nn.Linear(width,hidden_dim))
+        elif var_encoder_type not in ('gat','attention'):
+            raise ValueError(f'Unknown variable encoder: {var_encoder_type}')
 
     def forward(self, anchors):
         B, H, K, N = anchors.shape
         D = self.hidden_dim
+        if K == 0:
+            return anchors.new_zeros(B,H,0,D)
+        if self._mlp_mixer is not None:
+            return self._mlp_mixer(anchors)
 
         # ── GAT path (asymmetric, directional attention) ──
         if self._gat_encoder is not None:
@@ -462,11 +487,14 @@ class HorizonCalDecoder(nn.Module):
 # ═══════════════════════════════════════════════════════════════════
 
 class MultiSourceGateFusion(nn.Module):
-    def __init__(self, hidden_dim, horizon, calendar_dim=5):
+    def __init__(self, hidden_dim, horizon, calendar_dim=5, num_sources=3):
         super().__init__()
+        if num_sources not in (2,3):
+            raise ValueError('Fusion requires two or three sources')
+        self.num_sources = num_sources
         self.gate_predictor = nn.Sequential(
             nn.Linear(calendar_dim + 1, hidden_dim), nn.GELU(),
-            nn.Linear(hidden_dim, 3))
+            nn.Linear(hidden_dim, num_sources))
         self.norm = nn.LayerNorm(hidden_dim)
 
     def forward(self, temporal_ctx, periodic_ctx, memory_ctx, future_calendar):
@@ -476,9 +504,11 @@ class MultiSourceGateFusion(nn.Module):
         gate_input = torch.cat([future_calendar, horizon_pos], dim=-1)
         gate_logits = self.gate_predictor(gate_input)
         gate = torch.softmax(gate_logits, dim=-1)
-        fused = (gate[..., 0:1] * temporal_ctx +
-                 gate[..., 1:2] * periodic_ctx +
-                 gate[..., 2:3] * memory_ctx)
+        fused = gate[..., 0:1] * temporal_ctx + gate[..., 1:2] * periodic_ctx
+        if self.num_sources == 3:
+            if memory_ctx is None:
+                raise ValueError('Three-source fusion requires a memory input (zero for legacy memory-free runs)')
+            fused = fused + gate[..., 2:3] * memory_ctx
         return self.norm(fused), gate
 
 
@@ -744,6 +774,19 @@ class MTTGNetModel(nn.Module):
         # the fixed-range normalisation above.  Identity by default.
         self._co2_mean = float(kwargs.pop('co2_mean', 0.0))
         self._co2_std  = float(kwargs.pop('co2_std', 1.0))
+        # Safety net (2026-09 code audit): the multiscale features and the
+        # co2_anchor_a log-forcing term reconstruct real ppm from the [0,1]-
+        # scaled input via co2_min/co2_max.  With the identity range (0/1) that
+        # reconstruction silently treats 0-1 AS ppm and log(C/284) becomes
+        # meaningless.  run_multiseed defaults to 280/1200; a runner that does
+        # not forward the range must not enable these features.
+        if (use_multiscale_co2 or co2_anchor_a) and self._co2_max <= 500.0:
+            raise ValueError(
+                f"use_multiscale_co2/co2_anchor_a need co2_min/co2_max = 280/1200 "
+                f"(real ppm range), got {self._co2_min}/{self._co2_max}. "
+                "The Trainer feeds CO2 pre-scaled to [0,1] over 280-1200 ppm; "
+                "without the real range the ppm reconstruction (and log(C/284)) "
+                "is silently wrong.")
 
         # ⓪ Variable GNN (pre-GRU variable interaction)
         if use_var_gnn:

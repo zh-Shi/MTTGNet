@@ -53,6 +53,8 @@ def _check_forwarded(kw: dict) -> None:
 
 
 def build_model(cfg, trainer) -> MTTGNetWrapper:
+    from src.fusion_config import record_fusion_config
+    record_fusion_config(cfg)
     m = cfg.get("model_params", {})
     ds = cfg["dataset"]
     kw = dict(
@@ -120,18 +122,35 @@ def build_model(cfg, trainer) -> MTTGNetWrapper:
         # whether to emit future_co2 in the batch; the model must be built with
         # the same switch or the batch supplies an input the model ignores.
         use_future_co2=ds.get("use_future_co2", False),
+        # ── clean-architecture switches (src/mttgnet_test.py, arch: clean) ──
+        # Ignored by the legacy wrapper (they fall into **kwargs); the clean
+        # wrapper reads them.  Defaults keep legacy behaviour.
+        query_refine=m.get("query_refine", False),
+        mem_clean=m.get("mem_clean", False),
+        decoder_bypass=m.get("decoder_bypass", True),
+        time_bias_mode=m.get("time_bias_mode", "key"),
+        co2_mode=m.get("co2_mode", "learned"),
+        gnn_dynamic=m.get("gnn_dynamic", False),
+        fusion_sources=m.get('fusion_sources', 3),
+        co2_attention_modulation=m.get('co2_attention_modulation', True),
+        co2_additive_bias=m.get('co2_additive_bias', True),
     )
     _check_forwarded(kw)
+    if m.get("arch", "mttgnet") == "clean":
+        from src.mttgnet_test import MTTGNetTestWrapper
+        return MTTGNetTestWrapper(**kw).to(trainer.device)
     return MTTGNetWrapper(**kw).to(trainer.device)
 
 
 def run_seed(cfg: dict, cfg_name: str, seed: int) -> dict:
-    cfg = dict(cfg)
+    import copy
+    cfg = copy.deepcopy(cfg)
     cfg["seed"] = seed
     out_root = PROJECT_ROOT / "outputs" / f"{cfg_name}_s{seed}"
     cfg["output"] = {
         "checkpoint_dir": str(out_root / "checkpoints"),
         "result_dir": str(out_root / "results"),
+        "legacy_scaler_export": cfg.get("output", {}).get("legacy_scaler_export", True),
     }
     seed_everything(seed)
     trainer = Trainer(cfg)

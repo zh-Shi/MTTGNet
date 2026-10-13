@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import math
+import hashlib
+import json
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
+
+from .validation_protocol import anchor_index_tables
 
 from .time_utils import (
     calendar_features,
@@ -44,6 +49,7 @@ class PeriodicAnchorDataset(Dataset):
         target_index: int,
         time_encode: bool = False,
         co2_index: int | None = None,
+        anchor_cache_dir: str | None = None,
     ) -> None:
         super().__init__()
 
@@ -114,7 +120,54 @@ class PeriodicAnchorDataset(Dataset):
         self._ts_to_idx = {int(v): i for i, v in enumerate(self._ts_ns)}
 
         # ── Pre-compute anchor indices & calendar features ──
-        self._precompute()
+        self._anchor_cache_dir = Path(anchor_cache_dir) if anchor_cache_dir else None
+        if not self._load_anchor_cache():
+            self._precompute()
+            self._save_anchor_cache()
+
+    _CACHE_ARRAYS = ('_daily_idx', '_yearly_idx', '_daily_gaps', '_yearly_gaps', '_calendar')
+
+    def _cache_folder(self):
+        if self._anchor_cache_dir is None:
+            return None
+        digest = hashlib.sha256(self._ts_ns.tobytes()+self.origin_indices.tobytes())
+        digest.update(str((self.horizon, self.daily_anchors, self.yearly_anchors)).encode())
+        for name in ('dataset.py', 'validation_protocol.py', 'time_utils.py'):
+            digest.update((Path(__file__).parent/name).read_bytes())
+        return self._anchor_cache_dir/digest.hexdigest()
+
+    def _load_anchor_cache(self):
+        folder = self._cache_folder()
+        if folder is None or not (folder/'complete.json').exists():
+            return False
+        record = json.loads((folder/'complete.json').read_text())
+        for name in self._CACHE_ARRAYS:
+            path = folder/f'{name}.npy'
+            if hashlib.sha256(path.read_bytes()).hexdigest() != record[name]['sha256']:
+                raise ValueError('Anchor cache corrupted: '+str(path))
+            array = np.load(path, mmap_mode='r')
+            if list(array.shape) != record[name]['shape'] or str(array.dtype) != record[name]['dtype']:
+                raise ValueError('Anchor cache shape or dtype mismatch')
+            setattr(self, name, array)
+        return True
+
+    def _save_anchor_cache(self):
+        folder = self._cache_folder()
+        if folder is None:
+            return
+        folder.mkdir(parents=True, exist_ok=True)
+        record = {}
+        for name in self._CACHE_ARRAYS:
+            array = getattr(self, name); path = folder/f'{name}.npy'
+            temporary = path.with_suffix('.tmp')
+            with temporary.open('wb') as stream:
+                np.save(stream, array)
+            temporary.replace(path)
+            record[name] = dict(sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                                shape=list(array.shape), dtype=str(array.dtype))
+        temporary = folder/'complete.tmp'
+        temporary.write_text(json.dumps(record))
+        temporary.replace(folder/'complete.json')
 
     # -----------------------------------------------------------------
     # Pre-computation (run once at init)
@@ -155,36 +208,16 @@ class PeriodicAnchorDataset(Dataset):
             origin_idx = int(self.origin_indices[i])
             origin_ns = ts_ns[origin_idx]
 
+            tables = anchor_index_tables(ts_pd, origin_idx, ts_pd[origin_idx+1:origin_idx+H+1], Kd, Ky, lookup=lut)
+            self._daily_idx[i] = tables['daily_indices']
+            self._yearly_idx[i] = tables['yearly_indices']
+            self._daily_gaps[i] = tables['daily_gaps']
+            self._yearly_gaps[i] = tables['yearly_gaps']
+
             for h in range(1, H + 1):
                 target_idx = origin_idx + h
                 target_ns = ts_ns[target_idx]
                 target_pd = ts_pd[target_idx]
-
-                # ── Daily anchors ──
-                horizon_hours = (target_ns - origin_ns) / NS_PER_HOUR
-                horizon_days = horizon_hours / 24.0
-                first_lag = max(1, math.ceil(float(horizon_days)))
-
-                for k in range(Kd):
-                    offset_ns = (first_lag + k) * NS_PER_DAY
-                    anchor_ns = target_ns - offset_ns
-                    idx = lut.get(anchor_ns, -1)
-                    if idx >= 0 and idx <= origin_idx:
-                        self._daily_idx[i, h - 1, k] = idx
-                        self._daily_gaps[i, h - 1, k] = (
-                            (target_ns - ts_ns[idx]) / NS_PER_DAY
-                        )
-
-                # ── Yearly anchors ──
-                for k in range(1, Ky + 1):
-                    anchor_pd = safe_shift_year(target_pd, years=k)
-                    anchor_ns = anchor_pd.value
-                    idx = lut.get(anchor_ns, -1)
-                    if idx >= 0 and idx <= origin_idx:
-                        self._yearly_idx[i, h - 1, k - 1] = idx
-                        self._yearly_gaps[i, h - 1, k - 1] = (
-                            (target_ns - ts_ns[idx]) / NS_PER_DAY
-                        )
 
                 # ── Calendar features ──
                 self._calendar[i, h - 1] = calendar_features(
@@ -290,24 +323,5 @@ def make_origin_indices(
     Returns:
         Array of valid origin indices
     """
-    time_index = pd.DatetimeIndex(pd.to_datetime(timestamps))
-    start = pd.Timestamp(split_start)
-    end = pd.Timestamp(split_end)
-
-    candidates = np.flatnonzero((time_index >= start) & (time_index <= end))
-
-    valid = []
-    for idx in candidates[::step_size]:
-        if idx - recent_length + 1 < 0:
-            continue
-        if idx + horizon >= len(time_index):
-            continue
-        # Ensure ALL horizon steps stay within the split boundary (no leakage).
-        # Targets cover [idx+1, idx+horizon], so the LAST target step is
-        # idx+horizon — checking idx+horizon-1 let the final step spill into
-        # the next split (e.g. a train origin predicting past train_end).
-        if time_index[idx + horizon] > end:
-            continue
-        valid.append(idx)
-
-    return np.asarray(valid, dtype=np.int64)
+    from .validation_protocol import make_origin_indices as shared_origins
+    return shared_origins(timestamps, split_start, split_end, recent_length, horizon, step_size)

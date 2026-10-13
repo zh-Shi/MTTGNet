@@ -15,6 +15,8 @@ Output:
 
 import numpy as np
 from pathlib import Path
+import argparse
+import json
 
 # ── Config ──
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -32,40 +34,35 @@ SCENARIOS = {
 STEPS_PER_DAY = 4  # 6-hourly
 
 
-def read_co2_monthly(path: Path) -> np.ndarray:
+def read_co2_monthly(path: Path, pressure_pa: float | None = None) -> np.ndarray:
     """Read monthly CO2 from CMIP6 netCDF4.
 
     Data is 4D [time, plev=19, lat=128, lon=256], unit = mol/mol.
-    We extract: near-surface level + global mean → ppm (×1e6).
+    Select the highest-pressure level by default, then average valid cells.
+    Explicit pressure_pa=100 reproduces the earlier 100-Pa layer choice.
     """
     import netCDF4 as nc
 
-    ds = nc.Dataset(str(path))
-    var = ds["co2"]
-    print(f"      shape={var.shape}")
-
-    # Read near-surface level (highest pressure = level 0 or -1)
-    # plev=19 is pressure levels. The last level is typically the surface.
-    co2_3d = var[:, -1, :, :]  # [time, lat, lon] — surface level
-    print(f"      surface level shape={co2_3d.shape}")
-
-    # Global area-weighted mean
-    lat = ds["lat"][:]  # degrees
-    weights = np.cos(np.deg2rad(lat))
-    weights = weights / weights.sum()
-
-    # Mean over lat, then lon (simple mean over lon if regular grid)
-    # Convert masked to plain array (fill masked with nearest valid)
-    if hasattr(co2_3d, 'filled'):
-        co2_3d = co2_3d.filled(np.nan)
-    co2_1d = np.average(co2_3d, axis=1, weights=weights)  # [time, lon]
-    co2_1d = np.nanmean(co2_1d, axis=1)  # [time]
-
-    ds.close()
-
-    # Convert mol/mol → ppm
-    co2_ppm = np.asarray(co2_1d, dtype=np.float32) * 1e6
-    return co2_ppm
+    with nc.Dataset(str(path)) as ds:
+        levels = np.asarray(ds['plev'][:], dtype=float)
+        unit = str(ds['plev'].units).lower()
+        if unit in ('hpa', 'mbar'):
+            levels *= 100.
+        elif unit != 'pa':
+            raise ValueError(f'Unsupported pressure unit: {unit}')
+        idx = int(np.argmax(levels)) if pressure_pa is None else int(np.argmin(np.abs(levels-pressure_pa)))
+        if pressure_pa is not None and not np.isclose(levels[idx],pressure_pa):
+            raise ValueError(f'Pressure {pressure_pa} Pa is not available in {path.name}')
+        print(f'      selected pressure: {levels[idx]:g} Pa (index {idx})')
+        field = np.asarray(np.ma.filled(ds['co2'][:,idx,:,:],np.nan),dtype=float)
+        weights = np.cos(np.deg2rad(np.asarray(ds['lat'][:],dtype=float)))[None,:,None]
+        valid = np.isfinite(field)
+        # Near-surface pressure levels have below-ground missing cells.
+        denominator = np.sum(valid*weights,axis=(1,2))
+        if np.any(denominator <= 0):
+            raise ValueError('Selected pressure level has a month with no valid cells')
+        mean = np.sum(np.where(valid,field,0.)*weights,axis=(1,2))/denominator
+    return mean.astype(np.float32)*1e6
 
 
 def monthly_to_6hourly(monthly: np.ndarray, start_year: int) -> np.ndarray:
@@ -82,7 +79,7 @@ def monthly_to_6hourly(monthly: np.ndarray, start_year: int) -> np.ndarray:
     total_days = int(days_per_month.sum())
     n_steps = total_days * 4  # 6-hourly
 
-    # Monthly positions at mid-month (fractional month index)
+    # Preserve the legacy month-start interpolation convention.
     monthly_x = np.arange(n_months, dtype=np.float64)
     # Cumulate days → fractional month index for each 6h step
     cum_days = np.concatenate([[0], np.cumsum(days_per_month)[:-1]])
@@ -94,7 +91,17 @@ def monthly_to_6hourly(monthly: np.ndarray, start_year: int) -> np.ndarray:
 
 
 def main():
-    out_dir = Path(OUT_DIR)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--data-dir',type=Path,default=DATA_DIR)
+    parser.add_argument('--out-dir',type=Path,default=OUT_DIR)
+    parser.add_argument('--pressure-pa',type=float,default=None,
+                        help='Default: highest-pressure layer. Use 100 for the archived manuscript inputs.')
+    parser.add_argument('--overwrite',action='store_true')
+    args = parser.parse_args()
+    out_dir = args.out_dir
+    existing = [p for name in SCENARIOS for p in (out_dir/f'co2_{name}.npy',out_dir/f'co2_{name}_monthly.npy') if p.exists()]
+    if existing and not args.overwrite:
+        parser.error('Existing CO2 arrays are protected; choose a new --out-dir or explicitly use --overwrite')
     out_dir.mkdir(parents=True, exist_ok=True)
 
     all_co2 = {}  # scenario_name → [T]
@@ -104,18 +111,23 @@ def main():
                   "ssp370": 2015, "ssp585": 2015}
 
     for scenario, filename in SCENARIOS.items():
-        fpath = DATA_DIR / filename
+        fpath = args.data_dir / filename
         if not fpath.exists():
             print(f"  SKIP {scenario}: file not found ({fpath})")
             continue
 
         print(f"  Reading {scenario} ...")
-        monthly = read_co2_monthly(fpath)
+        monthly = read_co2_monthly(fpath,args.pressure_pa)
         v0 = float(monthly.flat[0]) if hasattr(monthly, 'flat') else float(monthly[0])
         v1 = float(monthly.flat[-1]) if hasattr(monthly, 'flat') else float(monthly[-1])
         print(f"    {len(monthly)} months, range [{v0:.1f}, {v1:.1f}]")
 
         np.save(out_dir / f"co2_{scenario}_monthly.npy", monthly)
+        (out_dir/f'co2_{scenario}_processing.json').write_text(json.dumps(dict(
+            source_file=filename,pressure_pa=args.pressure_pa,
+            default_pressure_rule='highest available pressure',
+            averaging='cosine-latitude weighted mean over valid cells',
+            manuscript_compatibility='archived arrays used the last pressure layer, 100 Pa'),indent=2),encoding='utf-8')
 
         # Also write the 6-hourly arrays promised in the module docstring.
         # (Previously only *_monthly.npy was saved; the 6-hourly files were

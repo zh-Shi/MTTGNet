@@ -1,16 +1,4 @@
-# =============================================================================
-#  EXAMPLE CONFIG -- monthly two-variable configuration, the recipe run_mttgnet_projections.py defaults to
-#
-#  This is a template, not a record of a paper run.  To use it:
-#    1. put your prepared series at `data/processed/` (see README, "Data format")
-#       or edit `data.values_path` / `data.timestamps_path` below;
-#    2. run   python run_model.py configs/example_monthly.yaml
-#    3. outputs land in `outputs/<config-stem>_s<seed>/` (see `output.checkpoint_dir`).
-#
-#  Every key under `model_params` is read by src/mttgnet.py.  A key that the code
-#  does not forward is swallowed by `**kwargs`, so `src`'s runner asserts that all
-#  wrapper parameters are passed -- if you add one, add it to the runner too.
-# =============================================================================
+# Runtime example. Supply prepared data or edit the data paths before training.
 model_type: mttgnet
 seed: 123
 device: cuda
@@ -19,9 +7,7 @@ data:
   timestamps_path: data/processed/hadcrut5_timestamps.npy
   target_index: 0
   co2_index: 1
-  # Columns: [0] anomaly (degC)  [1] CMIP6 historical CO2 (ppm)
 split:
-  # Data range: 1850-01 → 2014-12  (aligned to CMIP6 historical CO2 end)
   train_end: '1990-12-15 00:00:00'
   val_end: '2004-12-15 00:00:00'
   test_end: '2014-12-15 00:00:00'
@@ -45,9 +31,9 @@ model_params:
   use_shift_encoder: true
   use_time_bias: true
   use_gate: true
-  var_encoder_type: "gat"
+  var_encoder_type: gat
   use_calendar: true
-  temporal_encoder: "gru"
+  temporal_encoder: gru
 training:
   batch_size: 64
   epochs: 10000
@@ -69,5 +55,6 @@ loss:
   extreme_weight: 0.0
   extreme_threshold: 1.5
 output:
-  checkpoint_dir: outputs/mttgnet_hadcrut5/checkpoints
-  result_dir: outputs/mttgnet_hadcrut5/results
+  checkpoint_dir: outputs/example_monthly/checkpoints
+  result_dir: outputs/example_monthly/results
+  legacy_scaler_export: false

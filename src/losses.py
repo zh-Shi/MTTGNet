@@ -124,7 +124,7 @@ class ShashLoss(nn.Module):
     ``prediction`` is expected to be the model's ``dist_params`` tensor; the
     ``target`` is the observed future window ``[B, H]``.
 
-    The same formula drives ``experiments/emulator_enhance/shash_emulator.py``
+    The same formula drives the retired SHASH probabilistic head (archived)
     (``shash_nll``); keeping a single implementation here lets the main model
     train with the identical objective as the standalone emulator.
     """

@@ -1,0 +1,86 @@
+# Runtime example. Supply prepared data or edit the data paths before training.
+# Use experiments/cmip6/run_cmip6_pure_ml.py, not run_model.py.
+model_type: mttgnet
+seed: 123
+device: cuda
+data:
+  target_index: 0
+  co2_index: 1
+split:
+  train_end: '2060-12-15 00:00:00'
+  val_end: '2080-12-15 00:00:00'
+  test_end: '2100-12-15 00:00:00'
+  mode: time
+dataset:
+  recent_length: 60
+  horizon: 120
+  daily_anchors: 0
+  yearly_anchors: 3
+  train_step_size: 1
+  eval_step_size: 1
+  time_encode: false
+  resolution: 1m
+  use_future_co2: true
+  scenarios:
+  - name: historical
+    values: data/processed/cmip6_tas/CNRM-ESM2-1/historical_values.npy
+    timestamps: data/processed/cmip6_tas/CNRM-ESM2-1/historical_timestamps.npy
+  - name: ssp126
+    values: data/processed/cmip6_tas/CNRM-ESM2-1/ssp126_values.npy
+    timestamps: data/processed/cmip6_tas/CNRM-ESM2-1/ssp126_timestamps.npy
+  - name: ssp245
+    values: data/processed/cmip6_tas/CNRM-ESM2-1/ssp245_values.npy
+    timestamps: data/processed/cmip6_tas/CNRM-ESM2-1/ssp245_timestamps.npy
+  - name: ssp370
+    values: data/processed/cmip6_tas/CNRM-ESM2-1/ssp370_values.npy
+    timestamps: data/processed/cmip6_tas/CNRM-ESM2-1/ssp370_timestamps.npy
+  - name: ssp585
+    values: data/processed/cmip6_tas/CNRM-ESM2-1/ssp585_values.npy
+    timestamps: data/processed/cmip6_tas/CNRM-ESM2-1/ssp585_timestamps.npy
+  scaler_fit: train
+model_params:
+  hidden_dim: 96
+  dropout: 0.15
+  memory_slots: 128
+  mem_top_k: 8
+  num_gru_layers: 2
+  use_memory: false
+  fusion_sources: 3
+  use_var_gnn: true
+  use_variable_encoder: true
+  use_shift_encoder: true
+  use_time_bias: true
+  use_gate: true
+  var_encoder_type: gat
+  use_calendar: true
+  arch: clean
+  query_refine: true
+  mem_clean: true
+  decoder_bypass: false
+  time_bias_mode: additive
+  co2_mode: counterfactual
+  co2_min: 280.0
+  co2_max: 1200.0
+training:
+  batch_size: 64
+  epochs: 400
+  learning_rate: 0.0001
+  weight_decay: 0.0005
+  lr_decay: 1.0e-05
+  lr_min: 5.0e-05
+  patience: 40
+  early_stop_min_delta: 0.001
+  gradient_clip: 1.0
+  grad_accum_steps: 1
+  num_workers: 4
+  pin_memory: true
+  use_amp: true
+loss:
+  delta_weight: 0.1
+  horizon_weight_power: 1.0
+  horizon_weight_max: 1.5
+  extreme_weight: 0.0
+  extreme_threshold: 1.5
+output:
+  checkpoint_dir: outputs/example_century/checkpoints
+  result_dir: outputs/example_century/results

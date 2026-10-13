@@ -1,179 +1,151 @@
-# MTTGNet — Multi-Timescale Graph-Temporal Network for Global Mean Surface Temperature
+# MTTGNet: Multi-Period Graph-Temporal Modeling for Global Temperature Forecasting
 
-A geophysically-grounded graph-temporal model for **global mean surface temperature
-(GMST)**, used at two timescales:
+MTTGNet combines recent temporal context, calendar-aligned historical anchors,
+variable encoding and CO2-conditioned state modulation. Weather examples predict
+global-mean ERA5 2-m air temperature over 7 and 30 days. A separate monthly CMIP6
+example supports conditional rollout under prescribed CO2 paths.
 
-* **weather scale (7 and 30 days)** — deterministic multi-step forecasting on raw
-  6-hourly ERA5, with an explicit encoding of the physics a forecast needs at each
-  lead time: orbital and diurnal phase (periodic anchors), directed atmospheric
-  coupling (variable interaction graph), and the CO₂ background state;
-* **century scale** — the same architecture trained on CMIP6 to represent
-  multi-year forced change, then driven by SSP CO₂ pathways to project 2081–2100
-  warming out of sample.
+This is a compact runtime repository: model and training code, input preparation,
+conditional inference, four example configurations and runtime tests. Supply your
+own data before training. Paper sources, figures, checkpoints, evaluation results,
+private server tooling and the full experiment/analysis matrix are kept outside
+this public repository. These examples do not reproduce every published table.
 
-This repository contains the model, the training/evaluation pipeline, the data
-preparation scripts and the tests. It deliberately does **not** contain data,
-figures, trained checkpoints or the experiment scripts behind the paper; three
-example configs are included so the code runs as-is.
+## Install
 
----
-
-## 1. Install
+Use Python 3.10 or later and a PyTorch build appropriate for your CPU or GPU:
 
 ```bash
 pip install -r requirements.txt
+# Optional: raw ERA5/CMIP6 preparation
+pip install xarray netCDF4
+# Optional: tests
+pip install pytest
 ```
 
-The reported runs used **Python 3.10, PyTorch 2.1.2+cu121, one NVIDIA GPU**. The
-H=28 configuration needs roughly 4 GB of GPU memory at batch size 64. Everything
-except training runs on CPU.
+## Weather training
 
-## 2. Data format
-
-Training reads two NumPy files per dataset, named by the config:
-
-| key | shape | dtype | meaning |
-|---|---|---|---|
-| `data.values_path` | `[T, N]` | `float32` | one row per timestep; **column 0 = the target**, column 1 = CO₂ |
-| `data.timestamps_path` | `[T]` | `datetime64` | the matching time index |
-
-The column contract is fixed: `data.target_index = 0` and `data.co2_index = 1`, CO₂
-always immediately after the target. The remaining `N-2` columns are the atmospheric
-variables (the paper's Dataset D uses eight: the T2m target plus U10, V10, MSLP,
-SSRD, Niño3.4, TCC and CO₂). With `dataset.time_encode: true`, two sinusoidal
-time-of-day channels are appended internally, so temporal modules see
-`num_features + 2` channels.
-
-The papered series are area-weighted global means at 6-hourly resolution with the
-split `train 1980–2018 / val 2019–2020 / test 2021–2024`, but the loader only
-requires the column contract above — point `values_path` at your own series and it
-will train.
-
-**Building the series from raw reanalysis.** `scripts/prepare_datasets.py` does one
-netCDF pass over ERA5 and writes the feature bank plus the assembled A/B/C/D
-datasets; `scripts/prepare_hadcrut5.py`, `scripts/prepare_cmip6_tas.py`,
-`scripts/process_cmip6_co2.py` and `scripts/download_cmip6_tas.py` do the same for
-the HadCRUT5 record and the CMIP6 tas/CO₂ pathways. They need `xarray` and
-`netCDF4` (see `requirements.txt`) and your own raw-data access, so they are here
-for completeness rather than for out-of-the-box use.
-
-## 3. Quick start
+Prepare `data/processed/weather_values_D.npy` and
+`data/processed/weather_timestamps_D.npy`, or change the data paths in the config.
 
 ```bash
-# train the 7-day configuration (writes outputs/example_h28/...)
 python run_model.py configs/example_h28.yaml
-
-# 3-seed run with an aggregated summary
-python scripts/run_multiseed.py configs/example_h28.yaml --seeds 123,42,789
-
-# 30-day configuration
 python run_model.py configs/example_h120.yaml
-
-# century-scale SSP projection from a trained monthly model
-python run_mttgnet_projections.py
+python scripts/run_multiseed.py configs/example_h120.yaml --seeds 123,42,789
 ```
 
-`run_model.py` writes `checkpoints/best_model.pt` and a set of result arrays under
-`result_dir`, including `test_rmse_per_horizon.npy`, `test_predict.npy` and
-`test_target.npy`.
+Single-config runs write under `outputs/example_h28/` or `outputs/example_h120/`.
+Multi-seed runs write `outputs/<config-stem>_s<seed>/` and a summary JSON.
+Set `device: cpu`, `num_workers: 0`, `pin_memory: false` and `use_amp: false` for
+CPU runs. The weather examples retain the manuscript's architecture and training
+settings; GPU training is recommended for the complete 1980-2024 record.
 
-> **When you report an RMSE**, use the pooled definition
-> `sqrt(mean_h(rmse_h**2))` over `test_rmse_per_horizon.npy`. The flat RMSE over all
-> elements is a different, slightly smaller number; mixing the two is the easiest way
-> to misquote a result from this codebase.
+## Input contract and preparation
 
-## 4. Model
-
-`src/mttgnet.py` holds the whole model. The forward path is
-
-```
-x_recent ─┬─ VariableGNN ── GRU encoder ──┐
-          │                               ├─ MultiSourceGateFusion ─ per-horizon decoder → prediction
-anchors ──┴─ AnchorVariableEncoder (GAT) ─┤
-              → PeriodicAnchorAttention ──┤
-              → DistributionShiftEncoder ─┘   (CO₂ climate-state modulation)
-              DynamicMemory ──────────────────┘  (prototype bank, residual branch)
-```
-
-| module | class | role |
+| File | Shape | Meaning |
 |---|---|---|
-| variable-interaction graph | `mttgnet.VariableGNN` | directed coupling between atmospheric variables |
-| temporal encoder | `torch.nn.GRU` | stacked GRU over the look-back window |
-| anchor encoder | `mttgnet.AnchorVariableEncoder` | GAT over the retrieved historical anchors |
-| periodic attention | `mttgnet.PeriodicAnchorAttention` | phase-locked retrieval at the target's calendar position |
-| CO₂ modulation | `mttgnet.DistributionShiftEncoder` | log-forcing climate-state modulation + scalar bias |
-| prototype memory | `mttgnet.DynamicMemory` | learned bank of climate-state prototypes (residual branch) |
-| fusion | `mttgnet.MultiSourceGateFusion` | horizon-conditioned softmax over the sources |
-| decoder | `mttgnet.CalendarConditionedDecoder` and siblings | one scalar prediction per horizon step |
-| multi-rate branch | `MTTGNetModel` (coarse head + gate) | N-HiTS-style pooled coarse prediction |
+| values | `[T, N]`, float32 | Physical variables, temperature in column 0 and CO2 in column 1 |
+| timestamps | `[T]`, datetime64 | Matching chronological timestamps |
 
-Two design points the configs expose, worth knowing before ablating anything:
+Dataset D column order is `[T2m, CO2, U10, V10, MSLP, TISR, Nino3.4, TCC]`.
+TISR is top-of-atmosphere incident solar radiation. Optional hour sine/cosine
+channels are appended by the dataset loader, giving 10 model channels for the
+weather examples. The nominal 6-hour record removes February 29. Training,
+validation and testing cover 1980-2018, 2019-2020 and 2021-2024. Standardization
+uses the training period; CO2 uses the fixed range 280-1200 ppm.
 
-* **The prototype memory's fusion gate is initialised at `sigmoid(-3) ≈ 0.047`**
-  (`DynamicMemory`; `memory_gate_init` on the wrapper). The retrieved prototypes
-  therefore enter the residual branch at ~5 % weight, and in every checkpoint we
-  inspected the gate stayed within ±0.005 of that value. Ablating this module
-  therefore measures the extra residual branch much more than it measures retrieval.
-  Set `memory_gate_init: 0.0` to put retrieval at half weight, and verify the gate in
-  your own checkpoints.
-* **A component ablation is only interpretable if every row shares one parameter
-  base.** `use_multirate` changes `n_params` by 72; compare `n_params` in
-  `summary.txt` across the rows you put in one table.
+Weather CO2 uses NOAA GML Mauna Loa **daily means**, including the documented
+Maunakea substitution, interpolated to six hours. Nino3.4 uses the NOAA PSL
+**ERSSTv6 monthly anomaly** CSV, held constant within each calendar month.
+These retrospective inputs do not reconstruct historical publication vintages.
 
-Every `model_params` key in a config is read by `MTTGNetWrapper.__init__`. That
-constructor ends in `**kwargs`, so a key the runner forgets to forward is swallowed
-silently — `scripts/run_multiseed.py` therefore asserts that **all** wrapper
-parameters are passed and raises if one is missing. If you add a parameter, add it to
-that call too.
+```bash
+# Supply the original CSVs first. Existing CO2 output is protected against overwrite.
+python scripts/build_co2.py --csv data/co2/co2_daily_mlo.csv
+python scripts/build_nino34.py
+python scripts/prepare_datasets.py --help
+```
 
-## 5. Tests
+`build_nino34.py` accepts `data/nino34.anom.csv` or the historical filename
+`data/nina34.anom.csv`. `prepare_datasets.py` reads your raw ERA5 files; inspect its
+input paths before running. It consumes the prepared CO2 and Nino arrays.
+
+The exact CO2 CSV download/build vintage used for the manuscript was not retained.
+The archived daily CSV recreates 99.65% of the original preprocessing array;
+34 daily observations account for the remaining 227 interpolated steps (maximum
+0.17 ppm). Rebuilding with a different CSV version need not reproduce the stored
+manuscript inputs. The public repository contains no source data or residual CSVs.
+
+## Monthly CMIP6 training and conditional rollout
+
+Prepare the two-column monthly scenario arrays with
+`scripts/process_cmip6_co2.py` and `scripts/prepare_cmip6_tas.py`, using your own
+raw files. The CO2 processor selects the highest-pressure layer for new data and
+accounts for below-ground missing cells. Archived manuscript CO2 arrays used
+the last pressure layer (100 Pa), previously mislabeled near-surface; pass
+`--pressure-pa 100` to retain that layer choice. Existing arrays are protected
+against overwrite. Changing the layer defines a new input dataset and does not
+reproduce the archived experiment; no data are regenerated by installing this repo. The example config names the expected historical and four SSP arrays.
+The runner can replace their model directory with `--model`.
+
+```bash
+python experiments/cmip6/run_cmip6_pure_ml.py --config configs/example_century.yaml --model CNRM-ESM2-1 --seed 123 --out outputs/example_century_s123 --train-only
+python scripts/project_cmip6.py --run-dir outputs/example_century_s123 --device cuda:0 --advance 12
+```
+
+The monthly example uses a 60-month look-back, 120-month forecast, training through
+2060 and validation through 2080. Conditional inference loads the saved checkpoint
+and scaler, starts from historical temperature, then appends its own predictions.
+The default advances 12 months per call; `--advance 120` is a separate diagnostic.
+Future temperature is used only after rollout for scoring. Prescribed future CO2
+is available in this monthly protocol. The experiment does not establish transfer
+to unseen ESMs/SSPs or an isolated physical CO2 response.
+
+`configs/example_monthly.yaml` and `run_mttgnet_projections.py` retain the earlier
+HadCRUT5/CO2 observational example for compatibility. That separate exploratory
+recipe is not the current CMIP6 protocol.
+
+## Implementation and metrics
+
+The weather examples use `model_params.arch: clean`, dispatched to
+`src/mttgnet_test.py`. Shared components and compatibility configurations are in
+`src/mttgnet.py`; the former filename is a production model module.
+
+The current model disables prototype memory. Its fusion retains three logits:
+recent context, periodic context and a zero third source. `src/fusion_config.py`
+records this setting and recovers the exact gate width from saved checkpoints.
+Query refinement is enabled at H=120 and disabled at H=28. Historical anchor GAT
+and recent-window GNN are distinct encoders. Learned attention describes predictive
+associations. The anchor GAT may be replaced with `var_encoder_type: mlp_matched`;
+this matches active encoder capacity, not all registered model parameters.
+
+Overall RMSE is `sqrt(mean((prediction - target)**2))` for each trained seed;
+reported multi-seed RMSE is the arithmetic mean of those seed scores. With equally
+sized lead columns, `sqrt(mean_h(rmse_h**2))` gives the same quantity apart from
+numeric rounding. Averaging RMSE across leads or scoring a seed-averaged prediction
+is a different statistic. Report endpoint error separately from overall error.
 
 ```bash
 python -m pytest tests/ -q
 ```
 
-* `test_time_utils.py` — calendar and phase encoding,
-* `test_batch_independence.py` — the variable graph does not leak across the batch,
-* `test_future_leakage.py` — the split windows cannot see future targets.
+Tests cover calendar handling, origin-known anchors, batch independence, fusion
+configuration/checkpoint loading and recursive inference without future temperature
+feedback. `release_manifest.json` records the explicit exported file allowlist
+and content hashes.
 
-## 6. Configuration reference
+## Citation and license
 
-`configs/example_h28.yaml` (7-day), `configs/example_h120.yaml` (30-day) and
-`configs/example_monthly.yaml` (the monthly two-variable recipe used for the
-century-scale projection) are templates. The key groups are
-
-| group | what it controls |
-|---|---|
-| `data` | `values_path`, `timestamps_path`, `target_index=0`, `co2_index=1` |
-| `split` | `train_end` / `val_end` / `test_end` |
-| `dataset` | `recent_length` (look-back steps), `horizon`, `daily_anchors`, `yearly_anchors`, `train_step_size`, `eval_step_size`, `time_encode` |
-| `model_params` | every architectural switch listed in section 4 |
-| `training` | optimiser, `epochs`, `patience`, AMP, workers |
-| `loss` | `delta_weight`, `horizon_weight_power/max`, `short_lead_loss_steps/weight`, monotonicity and extreme weights |
-| `output` | `checkpoint_dir`, `result_dir` |
-
-`horizon` is in *steps* of the input resolution: 28 steps = 7 days and 120 steps =
-30 days at 6-hourly sampling; 120 steps = 10 years at monthly sampling.
-
-## 7. What is not here
-
-Data, figures, trained checkpoints, the per-experiment configs, and the analysis and
-plotting scripts behind the paper's tables. They are omitted deliberately: they are
-bulky, they are tied to one machine's directory layout, and reproducing them means
-re-running the model rather than reading a file. The pipeline above is the code that
-produces them.
-
-## 8. Citation
+The manuscript is a submission, not an accepted journal article:
 
 ```bibtex
-@article{shi2026mttgnet,
-  title   = {MTTGNet: Multi-Timescale Graph-Temporal Modelling of Global Mean Surface Temperature},
-  author  = {Shi, Zihao and Wang, Zhiguo and Chen, Ziwei},
-  journal = {IEEE Transactions on Geoscience and Remote Sensing},
-  year    = {2026}
+@misc{shi2026mttgnet,
+  title  = {MTTGNet: Multi-Period Graph-Temporal Modeling for Global Temperature Forecasting},
+  author = {Shi, Zihao and Wang, Zhiguo and Chen, Ziwei},
+  year   = {2026},
+  note   = {Manuscript},
+  url    = {https://github.com/zh-Shi/MTTGNet}
 }
 ```
 
-## License
-
-MIT — see `LICENSE`.
+MIT license; see `LICENSE`.
