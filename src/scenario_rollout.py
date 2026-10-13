@@ -74,4 +74,3 @@ def autoregressive_project(model, origin_idx, co2_future, values_all, ts, scaler
         scaled = np.concatenate([scaled,appended],axis=0)
         history_ts = history_ts.append(targets[:hs])
     return np.asarray(preds,dtype=np.float64)
-
